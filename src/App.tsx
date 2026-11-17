@@ -2199,6 +2199,12 @@ export default function App() {
             </div>
           </div>
         )}
+
+        <footer className="px-4 2xl:px-8 py-1.5 border-t border-slate-200/80 dark:border-slate-800/80 bg-white dark:bg-slate-950 flex items-center justify-end shrink-0">
+          <span className="text-[11px] text-slate-400 dark:text-slate-500">
+            opennote by calz
+          </span>
+        </footer>
       </div>
 
       {/* Dedicated Concept Diagram Studio Modal */}

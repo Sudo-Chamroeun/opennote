@@ -763,6 +763,11 @@ export const AuthGate: React.FC<AuthGateProps> = ({
           <p className="text-[11px] text-center text-slate-500 dark:text-slate-400">
             Offline mode stores notes and concept diagrams directly in browser IndexedDB.
           </p>
+          <footer className="pt-1 text-center">
+            <span className="text-[11px] text-slate-400 dark:text-slate-500">
+              opennote by calz
+            </span>
+          </footer>
         </div>
       </div>
     </div>
