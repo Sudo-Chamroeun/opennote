@@ -1,0 +1,36 @@
+services:
+  opennote:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opennote-vault
+    restart: unless-stopped
+    ports:
+      - "${EXTERNAL_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATA_DIR=/app/data
+      - APP_URL=${APP_URL:-http://localhost:3000}
+      - HTTPS_URL=${HTTPS_URL:-https://notes.example.com}
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+      - JWT_SECRET=${JWT_SECRET:-change-this-to-a-long-random-secret-key}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-opennote-admin-change-me}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+    volumes:
+      - opennote_data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  opennote_data:

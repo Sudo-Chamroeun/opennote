@@ -1,0 +1,8 @@
+{
+  "name": "opennote",
+  "description": "End-to-end encrypted Markdown and concept-diagramming workspace with nested folders, offline-first sync, and OpenCode MCP integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
