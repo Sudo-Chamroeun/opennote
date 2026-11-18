@@ -1,0 +1,21 @@
+{
+  "name": "opennote",
+  "short_name": "opennote",
+  "description": "End-to-end encrypted Markdown and concept-diagramming workspace.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

@@ -2,7 +2,6 @@ import React, { useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
-  FileDown,
   FilePlus2,
   FileText,
   Folder,
@@ -10,6 +9,7 @@ import {
   FolderPlus,
   Hash,
   Palette,
+  Printer,
   Search,
   Trash2,
   X,
@@ -39,7 +39,7 @@ interface SidebarProps {
   onRenameFolder: (folderId: string, name: string) => void;
   onChangeFolderColor: (folderId: string, color: FolderColor) => void;
   onDeleteFolder: (folderId: string) => void;
-  onExportFolderPdf: (folderId: string) => void;
+  onPrintFolder: (folderId: string) => void;
   onChangeNoteColor: (noteId: string, color: FolderColor | undefined) => void;
   onDeleteNote: (noteId: string) => void;
   onMoveNote: (noteId: string, targetFolderId: string | null) => void;
@@ -64,7 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onRenameFolder,
   onChangeFolderColor,
   onDeleteFolder,
-  onExportFolderPdf,
+  onPrintFolder,
   onChangeNoteColor,
   onDeleteNote,
   onMoveNote,
@@ -370,15 +370,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </button>
             <button
               type="button"
-              aria-label={`Export folder '${branch.folder.name}' to PDF`}
-              title="Export folder to PDF"
+              aria-label={`Print folder '${branch.folder.name}'`}
+              title="Print folder"
               onClick={(e) => {
                 e.stopPropagation();
-                onExportFolderPdf(branch.folder.id);
+                onPrintFolder(branch.folder.id);
               }}
               className="p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
             >
-              <FileDown className="w-3.5 h-3.5" />
+              <Printer className="w-3.5 h-3.5" />
             </button>
             <button
               type="button"

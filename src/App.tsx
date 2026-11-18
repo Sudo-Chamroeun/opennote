@@ -9,7 +9,6 @@ import {
   Code,
   Copy,
   Edit3,
-  FileDown,
   FolderX,
   Heading1,
   Heading2,
@@ -20,6 +19,7 @@ import {
   Moon,
   Palette,
   Plug,
+  Printer,
   Redo2,
   RefreshCw,
   Shapes,
@@ -76,7 +76,7 @@ import {
   saveOfflineVault,
   type PendingSyncState,
 } from './utils/offlineStore';
-import { collectFolderNotesRecursive, exportNotesToPdf } from './utils/pdfExport';
+import { collectFolderNotesRecursive, printNotes } from './utils/printNotes';
 import { createSeedWorkspace } from './utils/seedVault';
 import {
   extractWordAtPosition,
@@ -1080,22 +1080,22 @@ export default function App() {
     }
   };
 
-  const handleExportActiveNotePdf = () => {
+  const handlePrintActiveNote = () => {
     if (!activeNote) return;
-    exportNotesToPdf(activeNote.title || 'Untitled Note', [activeNote]);
-    showNotice(`Prepared PDF export for "${activeNote.title || 'Untitled Note'}".`);
+    printNotes(activeNote.title || 'Untitled Note', [activeNote]);
+    showNotice(`Opening print dialog for "${activeNote.title || 'Untitled Note'}".`);
   };
 
-  const handleExportFolderPdf = (folderId: string) => {
+  const handlePrintFolder = (folderId: string) => {
     const folder = folders.find((f) => f.id === folderId && !f.deleted);
     if (!folder) return;
     const folderNotes = collectFolderNotesRecursive(folderId, folders, notes);
     if (folderNotes.length === 0) {
-      showNotice(`Folder "${folder.name}" has no notes to export.`);
+      showNotice(`Folder "${folder.name}" has no notes to print.`);
       return;
     }
-    exportNotesToPdf(folder.name, folderNotes);
-    showNotice(`Prepared PDF export for "${folder.name}" (${folderNotes.length} notes).`);
+    printNotes(folder.name, folderNotes);
+    showNotice(`Opening print dialog for "${folder.name}" (${folderNotes.length} notes).`);
   };
 
   const handleEditorContextMenu = (
@@ -1252,11 +1252,11 @@ export default function App() {
         onSelect: handleRedo,
       },
       {
-        id: 'ctx-export-pdf',
-        label: 'Export Note to PDF',
+        id: 'ctx-print-note',
+        label: 'Print Note',
         dividerBefore: true,
-        icon: <FileDown className="w-3.5 h-3.5" />,
-        onSelect: handleExportActiveNotePdf,
+        icon: <Printer className="w-3.5 h-3.5" />,
+        onSelect: handlePrintActiveNote,
       },
     );
 
@@ -1347,11 +1347,11 @@ export default function App() {
           onSelect: handleRedo,
         },
         {
-          id: 'pv-export-pdf',
-          label: 'Export Note to PDF',
+          id: 'pv-print-note',
+          label: 'Print Note',
           dividerBefore: true,
-          icon: <FileDown className="w-3.5 h-3.5" />,
-          onSelect: handleExportActiveNotePdf,
+          icon: <Printer className="w-3.5 h-3.5" />,
+          onSelect: handlePrintActiveNote,
         },
       ],
     });
@@ -1506,7 +1506,7 @@ export default function App() {
         onRenameFolder={handleRenameFolder}
         onChangeFolderColor={handleChangeFolderColor}
         onDeleteFolder={handleDeleteFolder}
-        onExportFolderPdf={handleExportFolderPdf}
+        onPrintFolder={handlePrintFolder}
         onChangeNoteColor={handleChangeNoteColor}
         onDeleteNote={handleDeleteNote}
         onMoveNote={handleMoveNote}
@@ -1584,13 +1584,13 @@ export default function App() {
             {activeNote && (
               <button
                 type="button"
-                onClick={handleExportActiveNotePdf}
-                aria-label="Export note to PDF"
-                title="Export note to PDF"
+                onClick={handlePrintActiveNote}
+                aria-label="Print note"
+                title="Print note"
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
               >
-                <FileDown className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
-                <span className="hidden sm:inline">Export PDF</span>
+                <Printer className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                <span className="hidden sm:inline">Print</span>
               </button>
             )}
 
@@ -2064,11 +2064,11 @@ export default function App() {
                   {activeNote.folderId && (
                     <button
                       type="button"
-                      onClick={() => handleExportFolderPdf(activeNote.folderId!)}
+                      onClick={() => handlePrintFolder(activeNote.folderId!)}
                       className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
                     >
-                      <FileDown className="w-3 h-3" />
-                      Folder PDF
+                      <Printer className="w-3 h-3" />
+                      Print Folder
                     </button>
                   )}
 

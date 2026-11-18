@@ -39,7 +39,7 @@ function renderConceptSvgHtml(diagram: ConceptDiagram): string {
   const vw = Math.max(320, maxX - vx + pad);
   const vh = Math.max(180, maxY - vy + pad);
   const nodeMap = new Map(diagram.nodes.map((n) => [n.id, n]));
-  const markerId = `pdf-arrow-${diagram.id.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const markerId = `print-arrow-${diagram.id.replace(/[^a-zA-Z0-9_-]/g, '')}`;
 
   const edgesSvg = diagram.edges
     .map((edge) => {
@@ -153,8 +153,8 @@ function renderNoteHtml(note: NoteItem): string {
   </article>`;
 }
 
-export function buildPrintablePdfHtml(title: string, notesToExport: NoteItem[]): string {
-  const articles = notesToExport
+export function buildPrintableNoteHtml(title: string, notesToPrint: NoteItem[]): string {
+  const articles = notesToPrint
     .map((n, idx) => `${idx > 0 ? '<div class="page-break"></div>' : ''}${renderNoteHtml(n)}`)
     .join('\n');
 
@@ -162,9 +162,10 @@ export function buildPrintablePdfHtml(title: string, notesToExport: NoteItem[]):
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>${escapeHtml(title)} — opennote PDF Export</title>
+  <title>${escapeHtml(title)} — opennote</title>
   <style>
     @page { margin: 18mm; }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     body {
       font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: #0f172a;
@@ -174,7 +175,7 @@ export function buildPrintablePdfHtml(title: string, notesToExport: NoteItem[]):
       max-width: 820px;
       margin: 0 auto;
     }
-    .export-banner {
+    .print-banner {
       border-bottom: 1px solid #cbd5e1;
       padding-bottom: 8px;
       margin-bottom: 20px;
@@ -205,9 +206,9 @@ export function buildPrintablePdfHtml(title: string, notesToExport: NoteItem[]):
   </style>
 </head>
 <body>
-  <div class="export-banner">
+  <div class="print-banner">
     <span>opennote · ${escapeHtml(title)}</span>
-    <span>Exported ${new Date().toLocaleDateString()}</span>
+    <span>Printed ${new Date().toLocaleDateString()}</span>
   </div>
   ${articles}
 </body>
@@ -234,9 +235,9 @@ export function collectFolderNotesRecursive(
   return notes.filter((n) => !n.deleted && n.folderId && folderIds.has(n.folderId));
 }
 
-export function exportNotesToPdf(title: string, notesToExport: NoteItem[]): void {
-  if (notesToExport.length === 0) return;
-  const html = buildPrintablePdfHtml(title, notesToExport);
+export function printNotes(title: string, notesToPrint: NoteItem[]): void {
+  if (notesToPrint.length === 0) return;
+  const html = buildPrintableNoteHtml(title, notesToPrint);
   const iframe = document.createElement('iframe');
   iframe.style.position = 'fixed';
   iframe.style.right = '0';
