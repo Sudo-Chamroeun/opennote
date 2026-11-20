@@ -11,7 +11,7 @@ interface MarkdownPreviewProps {
   onToggleChecklist: (lineIndex: number) => void;
   onClickWikilink: (title: string) => void;
   onClickTag: (tag: string) => void;
-  onEditConceptDiagram: (diagram: ConceptDiagram) => void;
+  onEditConceptDiagram?: (diagram: ConceptDiagram) => void;
   onDeleteConceptDiagram?: (diagramId: string) => void;
   onContextMenuDiagram?: (e: React.MouseEvent, diagram: ConceptDiagram) => void;
 }
@@ -226,7 +226,9 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
                   theme={theme}
                   readOnly
                   height={340}
-                  onRequestEdit={() => onEditConceptDiagram(block.diagram)}
+                  onRequestEdit={
+                    onEditConceptDiagram ? () => onEditConceptDiagram(block.diagram) : undefined
+                  }
                   onRequestDelete={
                     onDeleteConceptDiagram
                       ? () => onDeleteConceptDiagram(block.diagram.id)

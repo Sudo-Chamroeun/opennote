@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Copy, KeyRound, Plug, RefreshCw, Trash2, X } from 'lucide-react';
+import { Check, Copy, KeyRound, Pencil, Plug, RefreshCw, Trash2, X } from 'lucide-react';
 import type { AuthSession, McpTokenInfo, NoteItem } from '../types';
 
 interface McpModalProps {
@@ -195,6 +195,8 @@ export const McpModal: React.FC<McpModalProps> = ({
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [syncingBridge, setSyncingBridge] = useState(false);
+  const [renamingTokenId, setRenamingTokenId] = useState<string | null>(null);
+  const [renameTokenValue, setRenameTokenValue] = useState('');
 
   const origin =
     typeof window !== 'undefined' ? window.location.origin : 'https://notes.yourdomain.com';
@@ -240,6 +242,30 @@ export const McpModal: React.FC<McpModalProps> = ({
     });
     if (res.ok) {
       setTokens((prev) => prev.filter((t) => t.id !== id));
+    }
+  };
+
+  const renameToken = async (id: string) => {
+    if (!session) return;
+    const nextLabel = renameTokenValue.trim();
+    if (!nextLabel) {
+      setRenamingTokenId(null);
+      return;
+    }
+    const res = await fetch(`/api/mcp-tokens/${id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.token}`,
+      },
+      body: JSON.stringify({ label: nextLabel }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setTokens((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, label: data.info?.label ?? nextLabel } : t)),
+      );
+      setRenamingTokenId(null);
     }
   };
 
@@ -387,25 +413,82 @@ export const McpModal: React.FC<McpModalProps> = ({
 
                 {tokens.length > 0 && (
                   <div className="divide-y divide-slate-200 dark:divide-slate-800 rounded-lg border border-slate-200 dark:border-slate-800">
-                    {tokens.map((t) => (
-                      <div key={t.id} className="flex items-center justify-between px-3 py-2 text-xs">
-                        <div>
-                          <span className="font-medium text-slate-800 dark:text-slate-100">
-                            {t.label}
-                          </span>
-                          <span className="mx-2 text-slate-400">·</span>
-                          <code className="text-slate-500 font-mono">{t.prefix}...</code>
+                    {tokens.map((t) => {
+                      const isRenaming = renamingTokenId === t.id;
+                      return (
+                        <div key={t.id} className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
+                          {isRenaming ? (
+                            <form
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                void renameToken(t.id);
+                              }}
+                              className="flex-1 flex items-center gap-1.5"
+                            >
+                              <input
+                                type="text"
+                                autoFocus
+                                aria-label={`New name for MCP token ${t.label}`}
+                                value={renameTokenValue}
+                                onChange={(e) => setRenameTokenValue(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Escape') {
+                                    setRenamingTokenId(null);
+                                  }
+                                }}
+                                className="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-indigo-400 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                              />
+                              <button
+                                type="submit"
+                                className="px-2 py-1 rounded bg-indigo-600 text-white text-[11px] font-medium hover:bg-indigo-700"
+                              >
+                                Save
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRenamingTokenId(null)}
+                                className="px-1.5 py-1 rounded text-[11px] text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                              >
+                                Cancel
+                              </button>
+                            </form>
+                          ) : (
+                            <>
+                              <div className="min-w-0 flex items-center flex-wrap gap-1">
+                                <span className="font-medium text-slate-800 dark:text-slate-100 truncate">
+                                  {t.label}
+                                </span>
+                                <span className="mx-1 text-slate-400">·</span>
+                                <code className="text-slate-500 font-mono">{t.prefix}...</code>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRenamingTokenId(t.id);
+                                    setRenameTokenValue(t.label);
+                                  }}
+                                  aria-label={`Rename MCP token ${t.label}`}
+                                  title="Rename key"
+                                  className="p-1 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => revokeToken(t.id)}
+                                  aria-label={`Revoke MCP token ${t.label}`}
+                                  title="Revoke key"
+                                  className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </>
+                          )}
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => revokeToken(t.id)}
-                          aria-label={`Revoke MCP token ${t.label}`}
-                          className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

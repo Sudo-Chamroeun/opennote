@@ -201,3 +201,47 @@ export function mergeVersionedItems<T extends { id: string; updatedAt: number; v
   }
   return Array.from(map.values());
 }
+
+export function collectShareSnapshot(
+  targetType: 'note' | 'folder',
+  targetId: string,
+  folders: FolderItem[],
+  notes: NoteItem[],
+): { title: string; folders: FolderItem[]; notes: NoteItem[] } | null {
+  if (targetType === 'note') {
+    const note = notes.find((n) => n.id === targetId && !n.deleted);
+    if (!note) return null;
+    return {
+      title: note.title || 'Untitled Note',
+      folders: [],
+      notes: [note],
+    };
+  }
+
+  const rootFolder = folders.find((f) => f.id === targetId && !f.deleted);
+  if (!rootFolder) return null;
+
+  const activeFolders = folders.filter((f) => !f.deleted);
+  const includedFolderIds = new Set<string>([rootFolder.id]);
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const f of activeFolders) {
+      if (f.parentId && includedFolderIds.has(f.parentId) && !includedFolderIds.has(f.id)) {
+        includedFolderIds.add(f.id);
+        expanded = true;
+      }
+    }
+  }
+
+  const sharedFolders = activeFolders.filter((f) => includedFolderIds.has(f.id));
+  const sharedNotes = notes.filter(
+    (n) => !n.deleted && n.folderId !== null && includedFolderIds.has(n.folderId),
+  );
+
+  return {
+    title: rootFolder.name || 'Shared Folder',
+    folders: sharedFolders,
+    notes: sharedNotes,
+  };
+}

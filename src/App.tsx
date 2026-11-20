@@ -23,6 +23,7 @@ import {
   Redo2,
   RefreshCw,
   Shapes,
+  Share2,
   SpellCheck,
   Sun,
   Table,
@@ -40,6 +41,8 @@ import {
   SegmentedMarkdownEditor,
   type SegmentedMarkdownEditorHandle,
 } from './components/SegmentedMarkdownEditor';
+import { SharedView } from './components/SharedView';
+import { ShareModal } from './components/ShareModal';
 import { Sidebar } from './components/Sidebar';
 import type {
   AuthSession,
@@ -51,8 +54,15 @@ import type {
   FolderColor,
   FolderItem,
   NoteItem,
+  ShareLinkInfo,
 } from './types';
-import { deriveVaultKey, decryptPayload, encryptPayload } from './utils/crypto';
+import {
+  deriveVaultKey,
+  decryptPayload,
+  encryptPayload,
+  exportVaultKeyJwk,
+  importVaultKeyJwk,
+} from './utils/crypto';
 import {
   createDefaultNode,
   createEdge,
@@ -88,6 +98,7 @@ import {
 } from './utils/spellcheck';
 import {
   FOLDER_COLORS,
+  collectShareSnapshot,
   getAllNoteTags,
   getFolderBreadcrumbs,
   isDescendantFolder,
@@ -101,9 +112,70 @@ interface VaultContextState {
   scopeKey: string;
 }
 
+interface StoredActiveSession {
+  mode: 'server' | 'offline';
+  scopeKey: string;
+  session?: AuthSession;
+  keyJwk?: JsonWebKey;
+}
+
+const ACTIVE_SESSION_STORAGE_KEY = 'opennote_active_session_v1';
 const IGNORED_WORDS_STORAGE_KEY = 'opennote_ignored_words';
 const IGNORED_PAGES_STORAGE_KEY = 'opennote_ignored_spell_pages';
 const IGNORED_FOLDERS_STORAGE_KEY = 'opennote_ignored_spell_folders';
+
+function getShareTokenFromLocation(): string | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  const qToken = params.get('share');
+  if (qToken && qToken.trim()) return qToken.trim();
+  const pathMatch = window.location.pathname.match(/^\/share\/([^/]+)/);
+  return pathMatch ? decodeURIComponent(pathMatch[1]) : null;
+}
+
+function loadStoredActiveSession(): StoredActiveSession | null {
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredActiveSession;
+    if (!parsed || !parsed.scopeKey) return null;
+    if (parsed.mode === 'offline') return parsed;
+    if (parsed.mode === 'server' && parsed.session?.token && parsed.keyJwk) return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function clearStoredActiveSession(): void {
+  try {
+    window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage removal errors
+  }
+}
+
+async function persistActiveSession(ctx: VaultContextState): Promise<void> {
+  try {
+    if (ctx.mode === 'offline') {
+      const payload: StoredActiveSession = { mode: 'offline', scopeKey: ctx.scopeKey };
+      window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, JSON.stringify(payload));
+      return;
+    }
+    if (ctx.mode === 'server' && ctx.session && ctx.vaultKey) {
+      const keyJwk = await exportVaultKeyJwk(ctx.vaultKey);
+      const payload: StoredActiveSession = {
+        mode: 'server',
+        scopeKey: ctx.scopeKey,
+        session: ctx.session,
+        keyJwk,
+      };
+      window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, JSON.stringify(payload));
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 function loadStringList(storageKey: string): string[] {
   try {
@@ -130,6 +202,8 @@ function decodeBase64UrlJson<T>(raw: string): T | null {
 export default function App() {
   const isAdminRoute =
     typeof window !== 'undefined' && window.location.pathname.startsWith('/opennote-admin');
+  const publicShareToken =
+    typeof window !== 'undefined' ? getShareTokenFromLocation() : null;
 
   const [settings, setSettings] = useState<EditorSettings>(() => loadEditorSettings());
   const [pendingGoogleSession, setPendingGoogleSession] = useState<AuthSession | null>(null);
@@ -153,8 +227,29 @@ export default function App() {
           scopeKey: 'local_offline_vault',
         };
       }
+      if (!isAdminRoute && !publicShareToken && !(params.get('resetToken') && params.get('email'))) {
+        const stored = loadStoredActiveSession();
+        if (stored?.mode === 'offline') {
+          return {
+            mode: 'offline',
+            session: null,
+            vaultKey: null,
+            scopeKey: stored.scopeKey,
+          };
+        }
+      }
     }
     return null;
+  });
+  const [restoringSession, setRestoringSession] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || isAdminRoute || publicShareToken) return false;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('autostart') === '1' || (params.get('resetToken') && params.get('email'))) {
+      return false;
+    }
+    if (window.location.hash.startsWith('#googleAuth=')) return false;
+    const stored = loadStoredActiveSession();
+    return Boolean(stored && stored.mode === 'server');
   });
 
   const [notes, setNotes] = useState<NoteItem[]>([]);
@@ -171,6 +266,8 @@ export default function App() {
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mcpModalOpen, setMcpModalOpen] = useState(false);
+  const [shareTarget, setShareTarget] = useState<{ type: 'note' | 'folder'; id: string } | null>(null);
+  const [userShares, setUserShares] = useState<ShareLinkInfo[]>([]);
   const [editingDiagram, setEditingDiagram] = useState<ConceptDiagram | null>(null);
   const [editingDiagramIsExisting, setEditingDiagramIsExisting] = useState(false);
   const [noteColorPickerOpen, setNoteColorPickerOpen] = useState(false);
@@ -273,12 +370,14 @@ export default function App() {
       if (savedPassphrase && savedPassphrase.length >= 6) {
         deriveVaultKey(savedPassphrase, session.user.vaultSalt)
           .then((vaultKey) => {
-            setVaultCtx({
+            const ctx: VaultContextState = {
               mode: 'server',
               session,
               vaultKey,
               scopeKey: `user_${session.user.id}`,
-            });
+            };
+            void persistActiveSession(ctx);
+            setVaultCtx(ctx);
           })
           .catch(() => setPendingGoogleSession(session));
       } else {
@@ -286,6 +385,61 @@ export default function App() {
       }
     }
   }, [isAdminRoute]);
+
+  // Restore logged-in server session across browser refreshes (HTTPS or local)
+  useEffect(() => {
+    if (!restoringSession) return;
+    let cancelled = false;
+    (async () => {
+      const stored = loadStoredActiveSession();
+      if (!stored || stored.mode !== 'server' || !stored.session || !stored.keyJwk) {
+        if (!cancelled) setRestoringSession(false);
+        return;
+      }
+      try {
+        const importedKey = await importVaultKeyJwk(stored.keyJwk);
+        let activeSession = stored.session;
+        try {
+          const meRes = await fetch('/api/auth/me', {
+            headers: { Authorization: `Bearer ${stored.session.token}` },
+          });
+          if (meRes.status === 401) {
+            clearStoredActiveSession();
+            if (!cancelled) {
+              setVaultCtx(null);
+              setRestoringSession(false);
+            }
+            return;
+          }
+          if (meRes.ok) {
+            const meData = await meRes.json();
+            if (meData.user) {
+              activeSession = { token: stored.session.token, user: meData.user };
+            }
+          }
+        } catch {
+          // Offline or temporary network blip: keep encrypted vault accessible with local stored key
+        }
+
+        if (!cancelled) {
+          setVaultCtx({
+            mode: 'server',
+            session: activeSession,
+            vaultKey: importedKey,
+            scopeKey: stored.scopeKey,
+          });
+        }
+      } catch {
+        clearStoredActiveSession();
+      } finally {
+        if (!cancelled) setRestoringSession(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [restoringSession]);
 
   // Network online/offline listeners
   useEffect(() => {
@@ -465,14 +619,86 @@ export default function App() {
           exposeToMcp: true,
         }));
 
-        const mergedNotes = mergeVersionedItems(
+        let mergedNotes = mergeVersionedItems(
           mergeVersionedItems(currentNotes, decryptedNotes),
           inboxNotes,
         );
-        const mergedFolders = mergeVersionedItems(currentFolders, decryptedFolders);
+        let mergedFolders = mergeVersionedItems(currentFolders, decryptedFolders);
+        let nextDirtyNoteIds = inboxNotes.map((n) => n.id);
+        let nextDirtyFolderIds: string[] = [];
+
+        // Fetch & two-way sync active public HTTPS shares
+        try {
+          const sharesListRes = await fetch('/api/shares', {
+            headers: { Authorization: `Bearer ${vaultCtx.session.token}` },
+          });
+          if (sharesListRes.ok) {
+            const sharesData = (await sharesListRes.json()) as { shares?: ShareLinkInfo[] };
+            const currentShares = sharesData.shares ?? [];
+            if (currentShares.length > 0) {
+              const snapshots = currentShares
+                .map((s) => {
+                  const snap = collectShareSnapshot(
+                    s.targetType,
+                    s.targetId,
+                    mergedFolders,
+                    mergedNotes,
+                  );
+                  if (!snap) return null;
+                  return {
+                    shareId: s.id,
+                    title: snap.title,
+                    folders: snap.folders,
+                    notes: snap.notes,
+                  };
+                })
+                .filter((x): x is NonNullable<typeof x> => x !== null);
+
+              const shareSyncRes = await fetch('/api/shares/sync', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${vaultCtx.session.token}`,
+                },
+                body: JSON.stringify({ snapshots }),
+              });
+              if (shareSyncRes.ok) {
+                const syncedShares = (await shareSyncRes.json()) as {
+                  shares?: ShareLinkInfo[];
+                  visitorNotes?: NoteItem[];
+                  visitorFolders?: FolderItem[];
+                };
+                setUserShares(syncedShares.shares ?? currentShares);
+                if (syncedShares.visitorNotes?.length) {
+                  mergedNotes = mergeVersionedItems(mergedNotes, syncedShares.visitorNotes);
+                  nextDirtyNoteIds = Array.from(
+                    new Set([
+                      ...nextDirtyNoteIds,
+                      ...syncedShares.visitorNotes.map((n) => n.id),
+                    ]),
+                  );
+                }
+                if (syncedShares.visitorFolders?.length) {
+                  mergedFolders = mergeVersionedItems(mergedFolders, syncedShares.visitorFolders);
+                  nextDirtyFolderIds = Array.from(
+                    new Set([
+                      ...nextDirtyFolderIds,
+                      ...syncedShares.visitorFolders.map((f) => f.id),
+                    ]),
+                  );
+                }
+              }
+            } else {
+              setUserShares([]);
+            }
+          }
+        } catch {
+          // Non-fatal share sync failure
+        }
+
         const nextPending: PendingSyncState = {
-          dirtyNoteIds: inboxNotes.map((n) => n.id),
-          dirtyFolderIds: [],
+          dirtyNoteIds: nextDirtyNoteIds,
+          dirtyFolderIds: nextDirtyFolderIds,
           lastSyncedAt: data.syncedAt,
         };
 
@@ -1424,6 +1650,21 @@ export default function App() {
     }));
   };
 
+  if (publicShareToken) {
+    return (
+      <SharedView
+        token={publicShareToken}
+        theme={settings.theme}
+        onToggleTheme={() =>
+          setSettings((prev) => ({
+            ...prev,
+            theme: prev.theme === 'dark' ? 'light' : 'dark',
+          }))
+        }
+      />
+    );
+  }
+
   if (isAdminRoute) {
     return (
       <AdminDashboard
@@ -1435,6 +1676,14 @@ export default function App() {
           }))
         }
       />
+    );
+  }
+
+  if (restoringSession) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-white dark:bg-slate-950 text-slate-500 dark:text-slate-400 text-sm">
+        Restoring encrypted session...
+      </div>
     );
   }
 
@@ -1454,12 +1703,14 @@ export default function App() {
         }}
         onAuthenticated={({ mode, session, vaultKey, scopeKey }) => {
           setPendingGoogleSession(null);
-          setVaultCtx({
+          const nextCtx: VaultContextState = {
             mode,
             session: session ?? null,
             vaultKey: vaultKey ?? null,
             scopeKey,
-          });
+          };
+          void persistActiveSession(nextCtx);
+          setVaultCtx(nextCtx);
         }}
       />
     );
@@ -1507,6 +1758,7 @@ export default function App() {
         onChangeFolderColor={handleChangeFolderColor}
         onDeleteFolder={handleDeleteFolder}
         onPrintFolder={handlePrintFolder}
+        onShareFolder={(folderId) => setShareTarget({ type: 'folder', id: folderId })}
         onChangeNoteColor={handleChangeNoteColor}
         onDeleteNote={handleDeleteNote}
         onMoveNote={handleMoveNote}
@@ -1582,16 +1834,28 @@ export default function App() {
             </button>
 
             {activeNote && (
-              <button
-                type="button"
-                onClick={handlePrintActiveNote}
-                aria-label="Print note"
-                title="Print note"
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
-              >
-                <Printer className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
-                <span className="hidden sm:inline">Print</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShareTarget({ type: 'note', id: activeNote.id })}
+                  aria-label="Share note"
+                  title="Share note over HTTPS"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Share2 className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                  <span className="hidden sm:inline">Share</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePrintActiveNote}
+                  aria-label="Print note"
+                  title="Print note"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Printer className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                  <span className="hidden sm:inline">Print</span>
+                </button>
+              </>
             )}
 
             <button
@@ -1620,7 +1884,11 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => setVaultCtx(null)}
+              onClick={() => {
+                clearStoredActiveSession();
+                setUserShares([]);
+                setVaultCtx(null);
+              }}
               aria-label="Lock vault"
               title="Lock vault"
               className="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
@@ -2294,6 +2562,31 @@ export default function App() {
           }))
         }
         onSyncMcpBridge={handleSyncMcpBridge}
+      />
+
+      <ShareModal
+        isOpen={Boolean(shareTarget)}
+        target={shareTarget}
+        session={vaultCtx.session}
+        folders={folders}
+        notes={notes}
+        existingShare={
+          shareTarget
+            ? userShares.find(
+                (s) => s.targetType === shareTarget.type && s.targetId === shareTarget.id,
+              ) ?? null
+            : null
+        }
+        onShareSaved={(saved) => {
+          setUserShares((prev) => {
+            const exists = prev.some((s) => s.id === saved.id);
+            return exists ? prev.map((s) => (s.id === saved.id ? saved : s)) : [saved, ...prev];
+          });
+        }}
+        onShareDeleted={(shareId) => {
+          setUserShares((prev) => prev.filter((s) => s.id !== shareId));
+        }}
+        onClose={() => setShareTarget(null)}
       />
     </div>
   );

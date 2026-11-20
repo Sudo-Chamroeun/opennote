@@ -2,7 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import type { EncryptedEnvelope } from '../src/types';
+import type {
+  EncryptedEnvelope,
+  FolderItem,
+  NoteItem,
+  PublicSharePayload,
+  ShareLinkInfo,
+  SharePermission,
+} from '../src/types';
 
 export interface StoredUser {
   id: string;
@@ -175,6 +182,23 @@ export class VaultStore {
         expires_at INTEGER NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS shared_links (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        permission TEXT NOT NULL DEFAULT 'read',
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_links_owner_target
+        ON shared_links(owner_user_id, target_type, target_id);
     `);
 
     // Safe additive migration for existing SQLite databases
@@ -450,6 +474,28 @@ export class VaultStore {
     }));
   }
 
+  renameMcpToken(userId: string, tokenId: string, label: string): StoredMcpToken | null {
+    const cleanLabel = label.trim();
+    if (!cleanLabel) return null;
+    const result = this.db
+      .prepare('UPDATE mcp_tokens SET label = ? WHERE user_id = ? AND id = ?')
+      .run(cleanLabel, userId, tokenId);
+    if (Number(result.changes) === 0) return null;
+    const row = this.db
+      .prepare('SELECT * FROM mcp_tokens WHERE user_id = ? AND id = ? LIMIT 1')
+      .get(userId, tokenId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      userId: String(row.user_id),
+      label: String(row.label),
+      prefix: String(row.prefix),
+      tokenHash: String(row.token_hash),
+      createdAt: Number(row.created_at),
+      lastUsedAt: row.last_used_at ? Number(row.last_used_at) : undefined,
+    };
+  }
+
   deleteMcpToken(userId: string, tokenId: string): boolean {
     const result = this.db
       .prepare('DELETE FROM mcp_tokens WHERE user_id = ? AND id = ?')
@@ -576,6 +622,395 @@ export class VaultStore {
     if (row.expires_at < Date.now()) return null;
     if (row.email.toLowerCase() !== email.trim().toLowerCase()) return null;
     return row.user_id;
+  }
+
+  private parseSharePayload(raw: string): { folders: FolderItem[]; notes: NoteItem[] } {
+    try {
+      const parsed = JSON.parse(raw) as { folders?: FolderItem[]; notes?: NoteItem[] };
+      return {
+        folders: Array.isArray(parsed.folders) ? parsed.folders : [],
+        notes: Array.isArray(parsed.notes) ? parsed.notes : [],
+      };
+    } catch {
+      return { folders: [], notes: [] };
+    }
+  }
+
+  private mapShareInfo(row: Record<string, unknown>): ShareLinkInfo {
+    return {
+      id: String(row.id),
+      token: String(row.token),
+      targetType: row.target_type === 'folder' ? 'folder' : 'note',
+      targetId: String(row.target_id),
+      title: String(row.title),
+      permission: row.permission === 'readwrite' ? 'readwrite' : 'read',
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  upsertShareLink(params: {
+    ownerUserId: string;
+    targetType: 'note' | 'folder';
+    targetId: string;
+    title: string;
+    permission: SharePermission;
+    folders: FolderItem[];
+    notes: NoteItem[];
+  }): ShareLinkInfo {
+    const now = Date.now();
+    const cleanTitle = params.title.trim() || (params.targetType === 'folder' ? 'Shared Folder' : 'Untitled Note');
+    const payloadJson = JSON.stringify({
+      folders: params.folders,
+      notes: params.notes,
+    });
+
+    const existing = this.db
+      .prepare(
+        'SELECT * FROM shared_links WHERE owner_user_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
+      )
+      .get(params.ownerUserId, params.targetType, params.targetId) as
+      | Record<string, unknown>
+      | undefined;
+
+    if (existing) {
+      this.db
+        .prepare(
+          'UPDATE shared_links SET title = ?, permission = ?, payload_json = ?, updated_at = ? WHERE id = ?',
+        )
+        .run(cleanTitle, params.permission, payloadJson, now, String(existing.id));
+      return {
+        id: String(existing.id),
+        token: String(existing.token),
+        targetType: params.targetType,
+        targetId: params.targetId,
+        title: cleanTitle,
+        permission: params.permission,
+        createdAt: Number(existing.created_at),
+        updatedAt: now,
+      };
+    }
+
+    const id = `shr_${crypto.randomUUID().slice(0, 12)}`;
+    const token = `share_${crypto.randomBytes(18).toString('base64url')}`;
+    this.db
+      .prepare(
+        `INSERT INTO shared_links (id, owner_user_id, token, target_type, target_id, title, permission, payload_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        params.ownerUserId,
+        token,
+        params.targetType,
+        params.targetId,
+        cleanTitle,
+        params.permission,
+        payloadJson,
+        now,
+        now,
+      );
+
+    return {
+      id,
+      token,
+      targetType: params.targetType,
+      targetId: params.targetId,
+      title: cleanTitle,
+      permission: params.permission,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  listUserShares(ownerUserId: string): ShareLinkInfo[] {
+    const rows = this.db
+      .prepare('SELECT * FROM shared_links WHERE owner_user_id = ? ORDER BY created_at DESC')
+      .all(ownerUserId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.mapShareInfo(r));
+  }
+
+  updateUserShare(
+    ownerUserId: string,
+    shareId: string,
+    updates: {
+      permission?: SharePermission;
+      title?: string;
+      folders?: FolderItem[];
+      notes?: NoteItem[];
+    },
+  ): ShareLinkInfo | null {
+    const existing = this.db
+      .prepare('SELECT * FROM shared_links WHERE owner_user_id = ? AND id = ? LIMIT 1')
+      .get(ownerUserId, shareId) as Record<string, unknown> | undefined;
+    if (!existing) return null;
+
+    const now = Date.now();
+    const nextPermission: SharePermission =
+      updates.permission ?? (existing.permission === 'readwrite' ? 'readwrite' : 'read');
+    const nextTitle = updates.title?.trim() || String(existing.title);
+    const currentPayload = this.parseSharePayload(String(existing.payload_json));
+    const nextPayload = JSON.stringify({
+      folders: updates.folders ?? currentPayload.folders,
+      notes: updates.notes ?? currentPayload.notes,
+    });
+
+    this.db
+      .prepare(
+        'UPDATE shared_links SET permission = ?, title = ?, payload_json = ?, updated_at = ? WHERE id = ? AND owner_user_id = ?',
+      )
+      .run(nextPermission, nextTitle, nextPayload, now, shareId, ownerUserId);
+
+    return {
+      id: String(existing.id),
+      token: String(existing.token),
+      targetType: existing.target_type === 'folder' ? 'folder' : 'note',
+      targetId: String(existing.target_id),
+      title: nextTitle,
+      permission: nextPermission,
+      createdAt: Number(existing.created_at),
+      updatedAt: now,
+    };
+  }
+
+  deleteUserShare(ownerUserId: string, shareId: string): boolean {
+    const result = this.db
+      .prepare('DELETE FROM shared_links WHERE owner_user_id = ? AND id = ?')
+      .run(ownerUserId, shareId);
+    return Number(result.changes) > 0;
+  }
+
+  getPublicShareByToken(token: string): PublicSharePayload | null {
+    const row = this.db
+      .prepare('SELECT * FROM shared_links WHERE token = ? LIMIT 1')
+      .get(token.trim()) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const payload = this.parseSharePayload(String(row.payload_json));
+    return {
+      id: String(row.id),
+      token: String(row.token),
+      targetType: row.target_type === 'folder' ? 'folder' : 'note',
+      targetId: String(row.target_id),
+      title: String(row.title),
+      permission: row.permission === 'readwrite' ? 'readwrite' : 'read',
+      folders: payload.folders,
+      notes: payload.notes,
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  upsertPublicShareNote(
+    token: string,
+    incomingNote: NoteItem,
+  ): { status: 'ok' | 'not_found' | 'forbidden'; share?: PublicSharePayload; note?: NoteItem } {
+    const row = this.db
+      .prepare('SELECT * FROM shared_links WHERE token = ? LIMIT 1')
+      .get(token.trim()) as Record<string, unknown> | undefined;
+    if (!row) return { status: 'not_found' };
+    if (row.permission !== 'readwrite') return { status: 'forbidden' };
+
+    const targetType = row.target_type === 'folder' ? 'folder' : 'note';
+    const targetId = String(row.target_id);
+    if (targetType === 'note' && incomingNote.id !== targetId) {
+      return { status: 'forbidden' };
+    }
+
+    const payload = this.parseSharePayload(String(row.payload_json));
+    const allowedFolderIds = new Set(payload.folders.map((f) => f.id));
+    const sanitizedFolderId =
+      targetType === 'folder'
+        ? incomingNote.folderId && allowedFolderIds.has(incomingNote.folderId)
+          ? incomingNote.folderId
+          : targetId
+        : null;
+
+    const now = Date.now();
+    const idx = payload.notes.findIndex((n) => n.id === incomingNote.id);
+    const existing = idx >= 0 ? payload.notes[idx] : undefined;
+    const nextVersion = Math.max(
+      existing ? existing.version + 1 : 1,
+      typeof incomingNote.version === 'number' ? incomingNote.version : 1,
+    );
+
+    const savedNote: NoteItem = {
+      id: incomingNote.id,
+      title: typeof incomingNote.title === 'string' ? incomingNote.title : 'Untitled Note',
+      content: typeof incomingNote.content === 'string' ? incomingNote.content : '',
+      folderId: targetType === 'note' ? existing?.folderId ?? null : sanitizedFolderId,
+      color: incomingNote.color ?? existing?.color,
+      tags: Array.isArray(incomingNote.tags) ? incomingNote.tags : existing?.tags ?? [],
+      createdAt: existing?.createdAt ?? incomingNote.createdAt ?? now,
+      updatedAt: now,
+      version: nextVersion,
+      deleted: Boolean(incomingNote.deleted),
+      exposeToMcp: existing?.exposeToMcp,
+    };
+
+    const nextNotes =
+      idx >= 0
+        ? payload.notes.map((n, i) => (i === idx ? savedNote : n))
+        : [savedNote, ...payload.notes];
+    const nextTitle =
+      targetType === 'note' ? savedNote.title || 'Untitled Note' : String(row.title);
+
+    this.db
+      .prepare('UPDATE shared_links SET title = ?, payload_json = ?, updated_at = ? WHERE id = ?')
+      .run(
+        nextTitle,
+        JSON.stringify({ folders: payload.folders, notes: nextNotes }),
+        now,
+        String(row.id),
+      );
+
+    return {
+      status: 'ok',
+      note: savedNote,
+      share: {
+        id: String(row.id),
+        token: String(row.token),
+        targetType,
+        targetId,
+        title: nextTitle,
+        permission: 'readwrite',
+        folders: payload.folders,
+        notes: nextNotes,
+        updatedAt: now,
+      },
+    };
+  }
+
+  createPublicShareFolder(
+    token: string,
+    folder: FolderItem,
+  ): { status: 'ok' | 'not_found' | 'forbidden'; share?: PublicSharePayload } {
+    const row = this.db
+      .prepare('SELECT * FROM shared_links WHERE token = ? LIMIT 1')
+      .get(token.trim()) as Record<string, unknown> | undefined;
+    if (!row) return { status: 'not_found' };
+    if (row.permission !== 'readwrite' || row.target_type !== 'folder') {
+      return { status: 'forbidden' };
+    }
+
+    const payload = this.parseSharePayload(String(row.payload_json));
+    const allowedIds = new Set(payload.folders.map((f) => f.id));
+    const parentId =
+      folder.parentId && allowedIds.has(folder.parentId) ? folder.parentId : String(row.target_id);
+    const now = Date.now();
+    const savedFolder: FolderItem = {
+      ...folder,
+      parentId,
+      createdAt: folder.createdAt || now,
+      updatedAt: now,
+      version: Math.max(1, folder.version || 1),
+    };
+    const nextFolders = [...payload.folders.filter((f) => f.id !== savedFolder.id), savedFolder];
+
+    this.db
+      .prepare('UPDATE shared_links SET payload_json = ?, updated_at = ? WHERE id = ?')
+      .run(
+        JSON.stringify({ folders: nextFolders, notes: payload.notes }),
+        now,
+        String(row.id),
+      );
+
+    return {
+      status: 'ok',
+      share: {
+        id: String(row.id),
+        token: String(row.token),
+        targetType: 'folder',
+        targetId: String(row.target_id),
+        title: String(row.title),
+        permission: 'readwrite',
+        folders: nextFolders,
+        notes: payload.notes,
+        updatedAt: now,
+      },
+    };
+  }
+
+  syncOwnerShares(
+    ownerUserId: string,
+    snapshots: Array<{
+      shareId: string;
+      title: string;
+      folders: FolderItem[];
+      notes: NoteItem[];
+    }>,
+  ): {
+    shares: ShareLinkInfo[];
+    visitorNotes: NoteItem[];
+    visitorFolders: FolderItem[];
+  } {
+    const snapshotMap = new Map(snapshots.map((s) => [s.shareId, s]));
+    const rows = this.db
+      .prepare('SELECT * FROM shared_links WHERE owner_user_id = ?')
+      .all(ownerUserId) as Array<Record<string, unknown>>;
+
+    const visitorNotes: NoteItem[] = [];
+    const visitorFolders: FolderItem[] = [];
+    const now = Date.now();
+
+    for (const row of rows) {
+      const shareId = String(row.id);
+      const snap = snapshotMap.get(shareId);
+      const serverPayload = this.parseSharePayload(String(row.payload_json));
+      if (!snap) continue;
+
+      const ownerNoteMap = new Map(snap.notes.map((n) => [n.id, n]));
+      const mergedNoteMap = new Map<string, NoteItem>();
+
+      for (const ownerNote of snap.notes) {
+        mergedNoteMap.set(ownerNote.id, ownerNote);
+      }
+      for (const serverNote of serverPayload.notes) {
+        const ownerNote = ownerNoteMap.get(serverNote.id);
+        if (
+          !ownerNote ||
+          serverNote.version > ownerNote.version ||
+          (serverNote.version === ownerNote.version && serverNote.updatedAt > ownerNote.updatedAt)
+        ) {
+          mergedNoteMap.set(serverNote.id, serverNote);
+          visitorNotes.push(serverNote);
+        }
+      }
+
+      const ownerFolderMap = new Map(snap.folders.map((f) => [f.id, f]));
+      const mergedFolderMap = new Map<string, FolderItem>();
+      for (const ownerFolder of snap.folders) {
+        mergedFolderMap.set(ownerFolder.id, ownerFolder);
+      }
+      for (const serverFolder of serverPayload.folders) {
+        const ownerFolder = ownerFolderMap.get(serverFolder.id);
+        if (
+          !ownerFolder ||
+          serverFolder.version > ownerFolder.version ||
+          (serverFolder.version === ownerFolder.version && serverFolder.updatedAt > ownerFolder.updatedAt)
+        ) {
+          mergedFolderMap.set(serverFolder.id, serverFolder);
+          visitorFolders.push(serverFolder);
+        }
+      }
+
+      const nextTitle = snap.title.trim() || String(row.title);
+      this.db
+        .prepare('UPDATE shared_links SET title = ?, payload_json = ?, updated_at = ? WHERE id = ?')
+        .run(
+          nextTitle,
+          JSON.stringify({
+            folders: Array.from(mergedFolderMap.values()),
+            notes: Array.from(mergedNoteMap.values()),
+          }),
+          now,
+          shareId,
+        );
+    }
+
+    return {
+      shares: this.listUserShares(ownerUserId),
+      visitorNotes,
+      visitorFolders,
+    };
   }
 
   getAdminReport(activeWindowDays = 7): AdminReport {

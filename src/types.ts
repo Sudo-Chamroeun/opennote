@@ -121,3 +121,28 @@ export interface McpTokenInfo {
   createdAt: number;
   lastUsedAt?: number;
 }
+
+export type SharePermission = 'read' | 'readwrite';
+
+export interface ShareLinkInfo {
+  id: string;
+  token: string;
+  targetType: 'note' | 'folder';
+  targetId: string;
+  title: string;
+  permission: SharePermission;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PublicSharePayload {
+  id: string;
+  token: string;
+  targetType: 'note' | 'folder';
+  targetId: string;
+  title: string;
+  permission: SharePermission;
+  folders: FolderItem[];
+  notes: NoteItem[];
+  updatedAt: number;
+}

@@ -17,7 +17,7 @@ import {
 import { isSmtpConfigured, sendPasswordResetEmail } from './server/email';
 import { createMcpRouterHandlers } from './server/mcp';
 import { VaultStore, type McpNoteSnapshot } from './server/store';
-import type { EncryptedEnvelope } from './src/types';
+import type { EncryptedEnvelope, FolderItem, NoteItem, SharePermission } from './src/types';
 
 const PORT = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production';
@@ -45,7 +45,7 @@ async function startServer() {
   app.use((req, res, next) => {
     const allowedOrigin = process.env.CORS_ORIGIN || process.env.HTTPS_URL || '*';
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
     if (req.method === 'OPTIONS') {
       res.status(204).end();
@@ -398,6 +398,29 @@ async function startServer() {
     });
   });
 
+  app.patch('/api/mcp-tokens/:id', requireAuth, (req: AuthenticatedRequest, res) => {
+    const tokenId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const label = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
+    if (!label) {
+      res.status(400).json({ error: 'Token label is required' });
+      return;
+    }
+    const updated = store.renameMcpToken(req.userId!, tokenId, label);
+    if (!updated) {
+      res.status(404).json({ error: 'Token not found' });
+      return;
+    }
+    res.json({
+      info: {
+        id: updated.id,
+        label: updated.label,
+        prefix: updated.prefix,
+        createdAt: updated.createdAt,
+        lastUsedAt: updated.lastUsedAt,
+      },
+    });
+  });
+
   app.delete('/api/mcp-tokens/:id', requireAuth, (req: AuthenticatedRequest, res) => {
     const tokenId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const removed = store.deleteMcpToken(req.userId!, tokenId);
@@ -412,6 +435,123 @@ async function startServer() {
     const notes = Array.isArray(req.body?.notes) ? (req.body.notes as McpNoteSnapshot[]) : [];
     store.setMcpNotes(req.userId!, notes);
     res.json({ ok: true, count: notes.length });
+  });
+
+  // HTTPS Note & Folder Sharing (owner management)
+  app.get('/api/shares', requireAuth, (req: AuthenticatedRequest, res) => {
+    res.json({ shares: store.listUserShares(req.userId!) });
+  });
+
+  app.post('/api/shares', requireAuth, (req: AuthenticatedRequest, res) => {
+    const targetType = req.body?.targetType === 'folder' ? 'folder' : req.body?.targetType === 'note' ? 'note' : null;
+    const targetId = typeof req.body?.targetId === 'string' ? req.body.targetId.trim() : '';
+    const permission: SharePermission = req.body?.permission === 'readwrite' ? 'readwrite' : 'read';
+    const title = typeof req.body?.title === 'string' ? req.body.title : '';
+    const folders = Array.isArray(req.body?.folders) ? (req.body.folders as FolderItem[]) : [];
+    const notes = Array.isArray(req.body?.notes) ? (req.body.notes as NoteItem[]) : [];
+
+    if (!targetType || !targetId) {
+      res.status(400).json({ error: 'targetType and targetId are required' });
+      return;
+    }
+
+    const share = store.upsertShareLink({
+      ownerUserId: req.userId!,
+      targetType,
+      targetId,
+      title,
+      permission,
+      folders,
+      notes,
+    });
+    res.status(201).json({ share });
+  });
+
+  app.patch('/api/shares/:id', requireAuth, (req: AuthenticatedRequest, res) => {
+    const shareId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const permission: SharePermission | undefined =
+      req.body?.permission === 'readwrite'
+        ? 'readwrite'
+        : req.body?.permission === 'read'
+          ? 'read'
+          : undefined;
+    const updated = store.updateUserShare(req.userId!, shareId, {
+      permission,
+      title: typeof req.body?.title === 'string' ? req.body.title : undefined,
+      folders: Array.isArray(req.body?.folders) ? (req.body.folders as FolderItem[]) : undefined,
+      notes: Array.isArray(req.body?.notes) ? (req.body.notes as NoteItem[]) : undefined,
+    });
+    if (!updated) {
+      res.status(404).json({ error: 'Share link not found' });
+      return;
+    }
+    res.json({ share: updated });
+  });
+
+  app.delete('/api/shares/:id', requireAuth, (req: AuthenticatedRequest, res) => {
+    const shareId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const removed = store.deleteUserShare(req.userId!, shareId);
+    if (!removed) {
+      res.status(404).json({ error: 'Share link not found' });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  app.post('/api/shares/sync', requireAuth, (req: AuthenticatedRequest, res) => {
+    const snapshots = Array.isArray(req.body?.snapshots) ? req.body.snapshots : [];
+    const result = store.syncOwnerShares(req.userId!, snapshots);
+    res.json(result);
+  });
+
+  // Public HTTPS Shared Link access (anyone with the link)
+  app.get('/api/public/share/:token', (req, res) => {
+    const token = Array.isArray(req.params.token) ? req.params.token[0] : req.params.token;
+    const share = store.getPublicShareByToken(token);
+    if (!share) {
+      res.status(404).json({ error: 'Shared link not found or revoked' });
+      return;
+    }
+    res.json({ share });
+  });
+
+  app.put('/api/public/share/:token/notes/:noteId', (req, res) => {
+    const token = Array.isArray(req.params.token) ? req.params.token[0] : req.params.token;
+    const noteId = Array.isArray(req.params.noteId) ? req.params.noteId[0] : req.params.noteId;
+    const note = req.body?.note as NoteItem | undefined;
+    if (!note || note.id !== noteId) {
+      res.status(400).json({ error: 'Valid note payload is required' });
+      return;
+    }
+    const result = store.upsertPublicShareNote(token, note);
+    if (result.status === 'not_found') {
+      res.status(404).json({ error: 'Shared link not found or revoked' });
+      return;
+    }
+    if (result.status === 'forbidden') {
+      res.status(403).json({ error: 'This shared link is read-only' });
+      return;
+    }
+    res.json({ note: result.note, share: result.share });
+  });
+
+  app.post('/api/public/share/:token/folders', (req, res) => {
+    const token = Array.isArray(req.params.token) ? req.params.token[0] : req.params.token;
+    const folder = req.body?.folder as FolderItem | undefined;
+    if (!folder || !folder.id) {
+      res.status(400).json({ error: 'Valid folder payload is required' });
+      return;
+    }
+    const result = store.createPublicShareFolder(token, folder);
+    if (result.status === 'not_found') {
+      res.status(404).json({ error: 'Shared link not found or revoked' });
+      return;
+    }
+    if (result.status === 'forbidden') {
+      res.status(403).json({ error: 'Folder creation is not allowed on this link' });
+      return;
+    }
+    res.status(201).json({ share: result.share });
   });
 
   // Coding Agent MCP endpoint

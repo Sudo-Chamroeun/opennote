@@ -9,8 +9,10 @@ import {
   FolderPlus,
   Hash,
   Palette,
+  Pencil,
   Printer,
   Search,
+  Share2,
   Trash2,
   X,
 } from 'lucide-react';
@@ -40,6 +42,7 @@ interface SidebarProps {
   onChangeFolderColor: (folderId: string, color: FolderColor) => void;
   onDeleteFolder: (folderId: string) => void;
   onPrintFolder: (folderId: string) => void;
+  onShareFolder: (folderId: string) => void;
   onChangeNoteColor: (noteId: string, color: FolderColor | undefined) => void;
   onDeleteNote: (noteId: string) => void;
   onMoveNote: (noteId: string, targetFolderId: string | null) => void;
@@ -65,6 +68,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onChangeFolderColor,
   onDeleteFolder,
   onPrintFolder,
+  onShareFolder,
   onChangeNoteColor,
   onDeleteNote,
   onMoveNote,
@@ -179,7 +183,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             )}
           </button>
 
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+          <div className="flex lg:hidden lg:group-hover:flex lg:focus-within:flex items-center gap-0.5 shrink-0">
             <button
               type="button"
               aria-label={`Customize color for file '${note.title || 'Untitled Note'}'`}
@@ -287,8 +291,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                if (renameText.trim()) {
-                  onRenameFolder(branch.folder.id, renameText.trim());
+                const trimmed = renameText.trim();
+                if (trimmed && trimmed !== branch.folder.name) {
+                  onRenameFolder(branch.folder.id, trimmed);
                 }
                 setRenamingFolderId(null);
               }}
@@ -300,7 +305,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 aria-label="Rename folder"
                 value={renameText}
                 onChange={(e) => setRenameText(e.target.value)}
-                onBlur={() => setRenamingFolderId(null)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setRenamingFolderId(null);
+                  }
+                }}
+                onBlur={() => {
+                  const trimmed = renameText.trim();
+                  if (trimmed && trimmed !== branch.folder.name) {
+                    onRenameFolder(branch.folder.id, trimmed);
+                  }
+                  setRenamingFolderId(null);
+                }}
                 className="w-full px-1.5 py-0.5 text-xs rounded border border-indigo-400 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
               />
             </form>
@@ -329,7 +346,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </button>
           )}
 
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+          <div className="flex lg:hidden lg:group-hover:flex lg:focus-within:flex items-center gap-0.5 shrink-0">
+            <button
+              type="button"
+              aria-label={`Rename folder '${branch.folder.name}'`}
+              title="Rename folder"
+              onClick={(e) => {
+                e.stopPropagation();
+                setRenamingFolderId(branch.folder.id);
+                setRenameText(branch.folder.name);
+              }}
+              className="p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+            </button>
             <button
               type="button"
               aria-label={`Customize color for ${branch.folder.name}`}
@@ -343,6 +373,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
               className="p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
             >
               <Palette className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              aria-label={`Share folder '${branch.folder.name}'`}
+              title="Share folder over HTTPS"
+              onClick={(e) => {
+                e.stopPropagation();
+                onShareFolder(branch.folder.id);
+              }}
+              className="p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+            >
+              <Share2 className="w-3.5 h-3.5" />
             </button>
             <button
               type="button"

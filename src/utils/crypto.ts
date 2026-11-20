@@ -42,7 +42,21 @@ export async function deriveVaultKey(passphrase: string, saltBase64: string): Pr
     },
     baseKey,
     { name: 'AES-GCM', length: 256 },
-    false,
+    true,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+export async function exportVaultKeyJwk(key: CryptoKey): Promise<JsonWebKey> {
+  return crypto.subtle.exportKey('jwk', key);
+}
+
+export async function importVaultKeyJwk(jwk: JsonWebKey): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    { name: 'AES-GCM', length: 256 },
+    true,
     ['encrypt', 'decrypt'],
   );
 }

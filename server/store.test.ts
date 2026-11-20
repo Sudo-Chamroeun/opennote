@@ -67,3 +67,73 @@ test('SQLite WAL VaultStore isolates 100+ parallel user syncs and tracks admin s
   const firstUserSummary = report.users.find((u) => u.id === createdUsers[0].id);
   assert.equal(firstUserSummary?.mcpTokenCount, 1);
 });
+
+test('MCP token rename and HTTPS folder/note sharing enforce read vs readwrite and two-way sync', () => {
+  const store = new VaultStore(undefined, ':memory:');
+  const owner = store.createUser({
+    email: 'owner@opennote.test',
+    name: 'Owner',
+    passwordHash: 'hash_owner',
+    vaultSalt: 'salt_owner',
+  });
+
+  // 1. MCP token rename
+  const tok = store.createMcpToken(owner.id, 'Old Key Name', 'mcp_abc', 'tok_hash_abc');
+  assert.equal(store.renameMcpToken(owner.id, tok.id, '   '), null);
+  const renamed = store.renameMcpToken(owner.id, tok.id, 'Production Antigravity');
+  assert.equal(renamed?.label, 'Production Antigravity');
+  assert.equal(store.listMcpTokens(owner.id)[0]?.label, 'Production Antigravity');
+
+  // 2. Read-only note share blocks writes
+  const note1 = {
+    id: 'note_shared_1',
+    title: 'Design Spec',
+    content: '# Hello World',
+    folderId: 'fld_shared',
+    tags: ['spec'],
+    createdAt: 1000,
+    updatedAt: 1000,
+    version: 1,
+  };
+  const noteShare = store.upsertShareLink({
+    ownerUserId: owner.id,
+    targetType: 'note',
+    targetId: note1.id,
+    title: note1.title,
+    permission: 'read',
+    folders: [],
+    notes: [note1],
+  });
+  const readWriteAttemptOnReadOnly = store.upsertPublicShareNote(noteShare.token, {
+    ...note1,
+    content: '# Tampered',
+    version: 2,
+  });
+  assert.equal(readWriteAttemptOnReadOnly.status, 'forbidden');
+
+  // Upgrade to readwrite and confirm visitor edit syncs back to owner
+  const upgraded = store.updateUserShare(owner.id, noteShare.id, { permission: 'readwrite' });
+  assert.equal(upgraded?.permission, 'readwrite');
+  const visitorEdit = store.upsertPublicShareNote(noteShare.token, {
+    ...note1,
+    content: '# Updated by Visitor',
+    version: 2,
+  });
+  assert.equal(visitorEdit.status, 'ok');
+  assert.equal(visitorEdit.note?.content, '# Updated by Visitor');
+
+  const syncBack = store.syncOwnerShares(owner.id, [
+    {
+      shareId: noteShare.id,
+      title: note1.title,
+      folders: [],
+      notes: [note1],
+    },
+  ]);
+  assert.equal(syncBack.visitorNotes.length, 1);
+  assert.equal(syncBack.visitorNotes[0].content, '# Updated by Visitor');
+
+  // Revoke removes public access
+  assert.equal(store.deleteUserShare(owner.id, noteShare.id), true);
+  assert.equal(store.getPublicShareByToken(noteShare.token), null);
+});
