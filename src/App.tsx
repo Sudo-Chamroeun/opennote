@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   Bold,
-  CheckCircle2,
   CheckSquare,
   ClipboardPaste,
   Cloud,
@@ -9,11 +11,12 @@ import {
   Code,
   Copy,
   Edit3,
-  FolderX,
   Heading1,
   Heading2,
   Highlighter,
   Italic,
+  List,
+  ListOrdered,
   LogOut,
   Menu,
   Moon,
@@ -24,10 +27,10 @@ import {
   RefreshCw,
   Shapes,
   Share2,
-  SpellCheck,
   Sun,
   Table,
   Trash2,
+  Underline,
   Undo2,
   X,
 } from 'lucide-react';
@@ -78,7 +81,12 @@ import {
   undoHistory,
   type NoteHistoryStack,
 } from './utils/history';
-import { toggleChecklistLine } from './utils/markdown';
+import {
+  applyAlignmentToMarkdown,
+  getEditorFontClass,
+  toggleChecklistLine,
+  type TextAlignment,
+} from './utils/markdown';
 import {
   loadEditorSettings,
   loadOfflineVault,
@@ -88,14 +96,6 @@ import {
 } from './utils/offlineStore';
 import { collectFolderNotesRecursive, printNotes } from './utils/printNotes';
 import { createSeedWorkspace } from './utils/seedVault';
-import {
-  extractWordAtPosition,
-  findSpellingIssues,
-  getSpellingSuggestions,
-  isSpellcheckSuppressedForNote,
-  isWordValid,
-  replaceWordInText,
-} from './utils/spellcheck';
 import {
   FOLDER_COLORS,
   collectShareSnapshot,
@@ -120,9 +120,10 @@ interface StoredActiveSession {
 }
 
 const ACTIVE_SESSION_STORAGE_KEY = 'opennote_active_session_v1';
-const IGNORED_WORDS_STORAGE_KEY = 'opennote_ignored_words';
-const IGNORED_PAGES_STORAGE_KEY = 'opennote_ignored_spell_pages';
-const IGNORED_FOLDERS_STORAGE_KEY = 'opennote_ignored_spell_folders';
+
+function getActiveNoteStorageKey(scopeKey: string): string {
+  return `opennote_active_note_${scopeKey}`;
+}
 
 function getShareTokenFromLocation(): string | null {
   if (typeof window === 'undefined') return null;
@@ -177,16 +178,6 @@ async function persistActiveSession(ctx: VaultContextState): Promise<void> {
   }
 }
 
-function loadStringList(storageKey: string): string[] {
-  try {
-    const raw = window.localStorage.getItem(storageKey);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((w): w is string => typeof w === 'string') : [];
-  } catch {
-    return [];
-  }
-}
 
 function decodeBase64UrlJson<T>(raw: string): T | null {
   try {
@@ -274,21 +265,6 @@ export default function App() {
   const [newTagInput, setNewTagInput] = useState('');
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
-  const [ignoredWords, setIgnoredWords] = useState<string[]>(() =>
-    loadStringList(IGNORED_WORDS_STORAGE_KEY),
-  );
-  const [ignoredSpellNoteIds, setIgnoredSpellNoteIds] = useState<string[]>(() =>
-    loadStringList(IGNORED_PAGES_STORAGE_KEY),
-  );
-  const [ignoredSpellFolderIds, setIgnoredSpellFolderIds] = useState<string[]>(() =>
-    loadStringList(IGNORED_FOLDERS_STORAGE_KEY),
-  );
-  const [spellPanelOpen, setSpellPanelOpen] = useState(false);
-  const [debouncedSpellSample, setDebouncedSpellSample] = useState<{
-    noteId: string | null;
-    content: string;
-    cursorPos: number | null;
-  }>({ noteId: null, content: '', cursorPos: null });
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -301,6 +277,15 @@ export default function App() {
     canRedo: false,
   });
   const historyMapRef = useRef<Map<string, NoteHistoryStack>>(new Map());
+
+  // Live synchronous refs eliminate race conditions when typing while background sync runs
+  const notesRef = useRef<NoteItem[]>(notes);
+  notesRef.current = notes;
+  const foldersRef = useRef<FolderItem[]>(folders);
+  foldersRef.current = folders;
+  const pendingRef = useRef<PendingSyncState>(pending);
+  pendingRef.current = pending;
+  const syncInFlightRef = useRef(false);
 
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true,
@@ -331,16 +316,15 @@ export default function App() {
     saveEditorSettings(settings);
   }, [settings]);
 
-  // Persist ignored spelling words, pages, and folders
+  // Persist active note selection across browser refreshes
   useEffect(() => {
+    if (!vaultReady || !vaultCtx || !activeNoteId) return;
     try {
-      window.localStorage.setItem(IGNORED_WORDS_STORAGE_KEY, JSON.stringify(ignoredWords));
-      window.localStorage.setItem(IGNORED_PAGES_STORAGE_KEY, JSON.stringify(ignoredSpellNoteIds));
-      window.localStorage.setItem(IGNORED_FOLDERS_STORAGE_KEY, JSON.stringify(ignoredSpellFolderIds));
+      window.localStorage.setItem(getActiveNoteStorageKey(vaultCtx.scopeKey), activeNoteId);
     } catch {
       // Ignore storage quota errors
     }
-  }, [ignoredWords, ignoredSpellNoteIds, ignoredSpellFolderIds]);
+  }, [vaultReady, vaultCtx, activeNoteId]);
 
   // Handle Google OAuth hash callback
   useEffect(() => {
@@ -468,23 +452,42 @@ export default function App() {
       const stored = await loadOfflineVault(vaultCtx.scopeKey);
       if (cancelled) return;
 
+      let savedActiveId: string | null = null;
+      try {
+        savedActiveId = window.localStorage.getItem(getActiveNoteStorageKey(vaultCtx.scopeKey));
+      } catch {
+        savedActiveId = null;
+      }
+
       if (stored.notes.length === 0 && stored.folders.length === 0) {
         const seed = createSeedWorkspace();
-        setFolders(seed.folders);
-        setNotes(seed.notes);
+        foldersRef.current = seed.folders;
+        notesRef.current = seed.notes;
         const initialPending: PendingSyncState = {
           dirtyNoteIds: seed.notes.map((n) => n.id),
           dirtyFolderIds: seed.folders.map((f) => f.id),
           lastSyncedAt: 0,
         };
+        pendingRef.current = initialPending;
+        setFolders(seed.folders);
+        setNotes(seed.notes);
         setPending(initialPending);
-        setActiveNoteId(seed.notes[0]?.id ?? null);
+        const restored = savedActiveId
+          ? seed.notes.find((n) => n.id === savedActiveId && !n.deleted)
+          : undefined;
+        setActiveNoteId((restored ?? seed.notes[0])?.id ?? null);
         await saveOfflineVault(vaultCtx.scopeKey, seed.notes, seed.folders, initialPending);
       } else {
+        foldersRef.current = stored.folders;
+        notesRef.current = stored.notes;
+        pendingRef.current = stored.pending;
         setFolders(stored.folders);
         setNotes(stored.notes);
         setPending(stored.pending);
-        const firstActive = stored.notes.find((n) => !n.deleted);
+        const restored = savedActiveId
+          ? stored.notes.find((n) => n.id === savedActiveId && !n.deleted)
+          : undefined;
+        const firstActive = restored ?? stored.notes.find((n) => !n.deleted);
         setActiveNoteId(firstActive?.id ?? null);
       }
       setVaultReady(true);
@@ -523,17 +526,24 @@ export default function App() {
         setSyncStatus('offline');
         return;
       }
+      if (syncInFlightRef.current) {
+        return;
+      }
 
-      const currentNotes = overrideNotes ?? notes;
-      const currentFolders = overrideFolders ?? folders;
-      const currentPending = overridePending ?? pending;
+      const snapshotNotes = overrideNotes ?? notesRef.current;
+      const snapshotFolders = overrideFolders ?? foldersRef.current;
+      const snapshotPending = overridePending ?? pendingRef.current;
 
+      syncInFlightRef.current = true;
       setSyncStatus('syncing');
       try {
-        const dirtyNotes = currentNotes.filter((n) => currentPending.dirtyNoteIds.includes(n.id));
-        const dirtyFolders = currentFolders.filter((f) =>
-          currentPending.dirtyFolderIds.includes(f.id),
+        const dirtyNotes = snapshotNotes.filter((n) => snapshotPending.dirtyNoteIds.includes(n.id));
+        const dirtyFolders = snapshotFolders.filter((f) =>
+          snapshotPending.dirtyFolderIds.includes(f.id),
         );
+
+        const sentNoteVersions = new Map(dirtyNotes.map((n) => [n.id, n.version]));
+        const sentFolderVersions = new Map(dirtyFolders.map((f) => [f.id, f.version]));
 
         const encryptedNotes: EncryptedEnvelope[] = await Promise.all(
           dirtyNotes.map(async (note) => {
@@ -619,13 +629,34 @@ export default function App() {
           exposeToMcp: true,
         }));
 
+        // Always merge against live refs so keystrokes typed while syncing are NEVER lost
+        const liveNotes = notesRef.current;
+        const liveFolders = foldersRef.current;
+        const livePending = pendingRef.current;
+
         let mergedNotes = mergeVersionedItems(
-          mergeVersionedItems(currentNotes, decryptedNotes),
+          mergeVersionedItems(liveNotes, decryptedNotes),
           inboxNotes,
         );
-        let mergedFolders = mergeVersionedItems(currentFolders, decryptedFolders);
-        let nextDirtyNoteIds = inboxNotes.map((n) => n.id);
-        let nextDirtyFolderIds: string[] = [];
+        let mergedFolders = mergeVersionedItems(liveFolders, decryptedFolders);
+
+        const stillDirtyNoteIds = livePending.dirtyNoteIds.filter((id) => {
+          const sentVer = sentNoteVersions.get(id);
+          if (sentVer === undefined) return true;
+          const liveNote = liveNotes.find((n) => n.id === id);
+          return Boolean(liveNote && liveNote.version > sentVer);
+        });
+        const stillDirtyFolderIds = livePending.dirtyFolderIds.filter((id) => {
+          const sentVer = sentFolderVersions.get(id);
+          if (sentVer === undefined) return true;
+          const liveFolder = liveFolders.find((f) => f.id === id);
+          return Boolean(liveFolder && liveFolder.version > sentVer);
+        });
+
+        let nextDirtyNoteIds = Array.from(
+          new Set([...stillDirtyNoteIds, ...inboxNotes.map((n) => n.id)]),
+        );
+        let nextDirtyFolderIds = Array.from(new Set(stillDirtyFolderIds));
 
         // Fetch & two-way sync active public HTTPS shares
         try {
@@ -702,16 +733,23 @@ export default function App() {
           lastSyncedAt: data.syncedAt,
         };
 
+        notesRef.current = mergedNotes;
+        foldersRef.current = mergedFolders;
+        pendingRef.current = nextPending;
         setNotes(mergedNotes);
         setFolders(mergedFolders);
         setPending(nextPending);
         await saveOfflineVault(vaultCtx.scopeKey, mergedNotes, mergedFolders, nextPending);
-        setSyncStatus('synced');
+        setSyncStatus(
+          nextDirtyNoteIds.length > 0 || nextDirtyFolderIds.length > 0 ? 'saving' : 'synced',
+        );
       } catch {
         setSyncStatus('offline');
+      } finally {
+        syncInFlightRef.current = false;
       }
     },
-    [vaultCtx, notes, folders, pending],
+    [vaultCtx],
   );
 
   useEffect(() => {
@@ -741,73 +779,7 @@ export default function App() {
     [folders, activeNote],
   );
 
-  const ignoredWordSet = useMemo(
-    () => new Set(ignoredWords.map((w) => w.toLowerCase())),
-    [ignoredWords],
-  );
-  const ignoredSpellNoteIdSet = useMemo(() => new Set(ignoredSpellNoteIds), [ignoredSpellNoteIds]);
-  const ignoredSpellFolderIdSet = useMemo(
-    () => new Set(ignoredSpellFolderIds),
-    [ignoredSpellFolderIds],
-  );
 
-  const spellSuppression = useMemo(
-    () =>
-      activeNote
-        ? isSpellcheckSuppressedForNote(
-            activeNote.id,
-            activeNote.folderId,
-            folders,
-            ignoredSpellNoteIdSet,
-            ignoredSpellFolderIdSet,
-          )
-        : { suppressed: false, reason: null, folderId: null },
-    [activeNote, folders, ignoredSpellNoteIdSet, ignoredSpellFolderIdSet],
-  );
-
-  // Debounce spellcheck scan so typing mid-word does not flicker/jump UI
-  useEffect(() => {
-    if (!activeNote) {
-      setDebouncedSpellSample({ noteId: null, content: '', cursorPos: null });
-      return;
-    }
-
-    // Immediate update when switching to a different note
-    if (debouncedSpellSample.noteId !== activeNote.id) {
-      setDebouncedSpellSample({
-        noteId: activeNote.id,
-        content: activeNote.content,
-        cursorPos: null,
-      });
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      const cursor =
-        document.activeElement?.tagName === 'TEXTAREA'
-          ? (editorRef.current?.getGlobalSelection().start ?? null)
-          : null;
-      setDebouncedSpellSample({
-        noteId: activeNote.id,
-        content: activeNote.content,
-        cursorPos: cursor,
-      });
-    }, 550);
-
-    return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeNote?.id, activeNote?.content]);
-
-  const spellingIssues = useMemo(() => {
-    if (!activeNote || spellSuppression.suppressed) return [];
-    if (debouncedSpellSample.noteId !== activeNote.id) return [];
-    return findSpellingIssues(
-      debouncedSpellSample.content,
-      ignoredWordSet,
-      25,
-      debouncedSpellSample.cursorPos,
-    );
-  }, [activeNote, spellSuppression.suppressed, debouncedSpellSample, ignoredWordSet]);
 
   // Initialize or refresh undo/redo meta when switching active note
   const syncHistoryMeta = useCallback((noteId: string | null) => {
@@ -848,7 +820,7 @@ export default function App() {
       updater: (prev: NoteItem) => NoteItem,
       options?: { recordHistory?: boolean; forceDiscrete?: boolean; cursorStart?: number; cursorEnd?: number },
     ) => {
-      const nextNotes = notes.map((n) => (n.id === noteId ? updater(n) : n));
+      const nextNotes = notesRef.current.map((n) => (n.id === noteId ? updater(n) : n));
       const updatedNote = nextNotes.find((n) => n.id === noteId);
 
       if (options?.recordHistory && updatedNote) {
@@ -882,14 +854,16 @@ export default function App() {
       }
 
       const nextPending: PendingSyncState = {
-        ...pending,
-        dirtyNoteIds: Array.from(new Set([...pending.dirtyNoteIds, noteId])),
+        ...pendingRef.current,
+        dirtyNoteIds: Array.from(new Set([...pendingRef.current.dirtyNoteIds, noteId])),
       };
+      notesRef.current = nextNotes;
+      pendingRef.current = nextPending;
       setNotes(nextNotes);
       setPending(nextPending);
-      persistLocal(nextNotes, folders, nextPending);
+      persistLocal(nextNotes, foldersRef.current, nextPending);
     },
-    [notes, folders, pending, persistLocal, syncHistoryMeta],
+    [persistLocal, syncHistoryMeta],
   );
 
   const handleUndo = useCallback(() => {
@@ -953,34 +927,38 @@ export default function App() {
       version: 1,
       exposeToMcp: false,
     };
-    const nextNotes = [newNote, ...notes];
+    const nextNotes = [newNote, ...notesRef.current];
     const nextPending: PendingSyncState = {
-      ...pending,
-      dirtyNoteIds: [...pending.dirtyNoteIds, newNote.id],
+      ...pendingRef.current,
+      dirtyNoteIds: Array.from(new Set([...pendingRef.current.dirtyNoteIds, newNote.id])),
     };
+    notesRef.current = nextNotes;
+    pendingRef.current = nextPending;
     setNotes(nextNotes);
     setPending(nextPending);
     setActiveNoteId(newNote.id);
     setEditingDiagram(null);
-    persistLocal(nextNotes, folders, nextPending);
+    persistLocal(nextNotes, foldersRef.current, nextPending);
   };
 
   const handleDeleteNote = (noteId: string) => {
     const now = Date.now();
-    const nextNotes = notes.map((n) =>
+    const nextNotes = notesRef.current.map((n) =>
       n.id === noteId ? { ...n, deleted: true, updatedAt: now, version: n.version + 1 } : n,
     );
     const nextPending: PendingSyncState = {
-      ...pending,
-      dirtyNoteIds: Array.from(new Set([...pending.dirtyNoteIds, noteId])),
+      ...pendingRef.current,
+      dirtyNoteIds: Array.from(new Set([...pendingRef.current.dirtyNoteIds, noteId])),
     };
+    notesRef.current = nextNotes;
+    pendingRef.current = nextPending;
     setNotes(nextNotes);
     setPending(nextPending);
     if (activeNoteId === noteId) {
       const fallback = nextNotes.find((n) => !n.deleted);
       setActiveNoteId(fallback?.id ?? null);
     }
-    persistLocal(nextNotes, folders, nextPending);
+    persistLocal(nextNotes, foldersRef.current, nextPending);
   };
 
   const handleCreateFolder = (
@@ -998,42 +976,48 @@ export default function App() {
       updatedAt: now,
       version: 1,
     };
-    const nextFolders = [...folders, folder];
+    const nextFolders = [...foldersRef.current, folder];
     const nextPending: PendingSyncState = {
-      ...pending,
-      dirtyFolderIds: [...pending.dirtyFolderIds, folder.id],
+      ...pendingRef.current,
+      dirtyFolderIds: Array.from(new Set([...pendingRef.current.dirtyFolderIds, folder.id])),
     };
+    foldersRef.current = nextFolders;
+    pendingRef.current = nextPending;
     setFolders(nextFolders);
     setPending(nextPending);
-    persistLocal(notes, nextFolders, nextPending);
+    persistLocal(notesRef.current, nextFolders, nextPending);
   };
 
   const handleRenameFolder = (folderId: string, name: string) => {
     const now = Date.now();
-    const nextFolders = folders.map((f) =>
+    const nextFolders = foldersRef.current.map((f) =>
       f.id === folderId ? { ...f, name, updatedAt: now, version: f.version + 1 } : f,
     );
     const nextPending: PendingSyncState = {
-      ...pending,
-      dirtyFolderIds: Array.from(new Set([...pending.dirtyFolderIds, folderId])),
+      ...pendingRef.current,
+      dirtyFolderIds: Array.from(new Set([...pendingRef.current.dirtyFolderIds, folderId])),
     };
+    foldersRef.current = nextFolders;
+    pendingRef.current = nextPending;
     setFolders(nextFolders);
     setPending(nextPending);
-    persistLocal(notes, nextFolders, nextPending);
+    persistLocal(notesRef.current, nextFolders, nextPending);
   };
 
   const handleChangeFolderColor = (folderId: string, color: FolderColor) => {
     const now = Date.now();
-    const nextFolders = folders.map((f) =>
+    const nextFolders = foldersRef.current.map((f) =>
       f.id === folderId ? { ...f, color, updatedAt: now, version: f.version + 1 } : f,
     );
     const nextPending: PendingSyncState = {
-      ...pending,
-      dirtyFolderIds: Array.from(new Set([...pending.dirtyFolderIds, folderId])),
+      ...pendingRef.current,
+      dirtyFolderIds: Array.from(new Set([...pendingRef.current.dirtyFolderIds, folderId])),
     };
+    foldersRef.current = nextFolders;
+    pendingRef.current = nextPending;
     setFolders(nextFolders);
     setPending(nextPending);
-    persistLocal(notes, nextFolders, nextPending);
+    persistLocal(notesRef.current, nextFolders, nextPending);
   };
 
   const handleChangeNoteColor = (noteId: string, color: FolderColor | undefined) => {
@@ -1047,10 +1031,10 @@ export default function App() {
 
   const handleDeleteFolder = (folderId: string) => {
     const now = Date.now();
-    const targetFolder = folders.find((f) => f.id === folderId);
+    const targetFolder = foldersRef.current.find((f) => f.id === folderId);
     const fallbackParent = targetFolder?.parentId ?? null;
 
-    const nextFolders = folders.map((f) => {
+    const nextFolders = foldersRef.current.map((f) => {
       if (f.id === folderId) {
         return { ...f, deleted: true, updatedAt: now, version: f.version + 1 };
       }
@@ -1061,7 +1045,7 @@ export default function App() {
     });
 
     const touchedNoteIds: string[] = [];
-    const nextNotes = notes.map((n) => {
+    const nextNotes = notesRef.current.map((n) => {
       if (n.folderId === folderId) {
         touchedNoteIds.push(n.id);
         return { ...n, folderId: fallbackParent, updatedAt: now, version: n.version + 1 };
@@ -1070,10 +1054,13 @@ export default function App() {
     });
 
     const nextPending: PendingSyncState = {
-      ...pending,
-      dirtyFolderIds: Array.from(new Set([...pending.dirtyFolderIds, folderId])),
-      dirtyNoteIds: Array.from(new Set([...pending.dirtyNoteIds, ...touchedNoteIds])),
+      ...pendingRef.current,
+      dirtyFolderIds: Array.from(new Set([...pendingRef.current.dirtyFolderIds, folderId])),
+      dirtyNoteIds: Array.from(new Set([...pendingRef.current.dirtyNoteIds, ...touchedNoteIds])),
     };
+    foldersRef.current = nextFolders;
+    notesRef.current = nextNotes;
+    pendingRef.current = nextPending;
     setFolders(nextFolders);
     setNotes(nextNotes);
     setPending(nextPending);
@@ -1090,20 +1077,22 @@ export default function App() {
   };
 
   const handleMoveFolder = (folderId: string, targetParentId: string | null) => {
-    if (targetParentId && isDescendantFolder(folders, targetParentId, folderId)) {
+    if (targetParentId && isDescendantFolder(foldersRef.current, targetParentId, folderId)) {
       return;
     }
     const now = Date.now();
-    const nextFolders = folders.map((f) =>
+    const nextFolders = foldersRef.current.map((f) =>
       f.id === folderId ? { ...f, parentId: targetParentId, updatedAt: now, version: f.version + 1 } : f,
     );
     const nextPending: PendingSyncState = {
-      ...pending,
-      dirtyFolderIds: Array.from(new Set([...pending.dirtyFolderIds, folderId])),
+      ...pendingRef.current,
+      dirtyFolderIds: Array.from(new Set([...pendingRef.current.dirtyFolderIds, folderId])),
     };
+    foldersRef.current = nextFolders;
+    pendingRef.current = nextPending;
     setFolders(nextFolders);
     setPending(nextPending);
-    persistLocal(notes, nextFolders, nextPending);
+    persistLocal(notesRef.current, nextFolders, nextPending);
   };
 
   const wrapSelection = (before: string, after = '', placeholder = 'text') => {
@@ -1133,6 +1122,57 @@ export default function App() {
     );
 
     editorRef.current?.focusGlobalRange(nextSelStart, nextSelEnd);
+  };
+
+  const insertListPrefix = (prefix: string, placeholder = 'List item') => {
+    if (!activeNote) return;
+    const sel = editorRef.current?.getGlobalSelection();
+    const start = Math.min(sel?.start ?? activeNote.content.length, activeNote.content.length);
+    const end = Math.min(sel?.end ?? start, activeNote.content.length);
+    const selected = activeNote.content.slice(start, end) || placeholder;
+    const needsNewline = start > 0 && activeNote.content[start - 1] !== '\n';
+    const leading = needsNewline ? `\n${prefix}` : prefix;
+    const nextText =
+      activeNote.content.slice(0, start) + leading + selected + activeNote.content.slice(end);
+    const nextSelStart = start + leading.length;
+    const nextSelEnd = nextSelStart + selected.length;
+
+    mutateNote(
+      activeNote.id,
+      (prev) => ({
+        ...prev,
+        content: nextText,
+        updatedAt: Date.now(),
+        version: prev.version + 1,
+      }),
+      { recordHistory: true, forceDiscrete: true, cursorStart: nextSelStart, cursorEnd: nextSelEnd },
+    );
+
+    editorRef.current?.focusGlobalRange(nextSelStart, nextSelEnd);
+  };
+
+  const handleAlignSelection = (align: TextAlignment) => {
+    if (!activeNote) return;
+    const sel = editorRef.current?.getGlobalSelection();
+    const start = sel?.start ?? activeNote.content.length;
+    const end = sel?.end ?? start;
+    const result = applyAlignmentToMarkdown(activeNote.content, start, end, align);
+    mutateNote(
+      activeNote.id,
+      (prev) => ({
+        ...prev,
+        content: result.content,
+        updatedAt: Date.now(),
+        version: prev.version + 1,
+      }),
+      {
+        recordHistory: true,
+        forceDiscrete: true,
+        cursorStart: result.cursorStart,
+        cursorEnd: result.cursorEnd,
+      },
+    );
+    editorRef.current?.focusGlobalRange(result.cursorStart, result.cursorEnd);
   };
 
   const handleOpenNewDiagram = () => {
@@ -1215,59 +1255,6 @@ export default function App() {
     showNotice(`Duplicated "${diagram.title || 'Concept Diagram'}".`);
   };
 
-  const handleIgnoreSpellingWord = (word: string) => {
-    const clean = word.trim().toLowerCase().replace(/^'+|'+$/g, '');
-    if (!clean) return;
-    setIgnoredWords((prev) => (prev.includes(clean) ? prev : [...prev, clean]));
-    showNotice(`Ignored "${word}" in spellcheck.`);
-  };
-
-  const handleToggleIgnoreSpellingPage = (noteId: string) => {
-    setIgnoredSpellNoteIds((prev) => {
-      const exists = prev.includes(noteId);
-      const next = exists ? prev.filter((id) => id !== noteId) : [...prev, noteId];
-      showNotice(
-        exists ? 'Re-enabled spellcheck on this page.' : 'Ignored spelling for entire page.',
-      );
-      return next;
-    });
-  };
-
-  const handleToggleIgnoreSpellingFolder = (folderId: string) => {
-    const folderName = folders.find((f) => f.id === folderId)?.name || 'folder';
-    setIgnoredSpellFolderIds((prev) => {
-      const exists = prev.includes(folderId);
-      const next = exists ? prev.filter((id) => id !== folderId) : [...prev, folderId];
-      showNotice(
-        exists
-          ? `Re-enabled spellcheck for "${folderName}".`
-          : `Ignored spelling for entire folder "${folderName}".`,
-      );
-      return next;
-    });
-  };
-
-  const handleFixSpellingAt = (start: number, end: number, replacement: string) => {
-    if (!activeNote) return;
-    const nextText = replaceWordInText(activeNote.content, start, end, replacement);
-    const nextCursor = start + replacement.length;
-    setDebouncedSpellSample({
-      noteId: activeNote.id,
-      content: nextText,
-      cursorPos: null,
-    });
-    mutateNote(
-      activeNote.id,
-      (prev) => ({
-        ...prev,
-        content: nextText,
-        updatedAt: Date.now(),
-        version: prev.version + 1,
-      }),
-      { recordHistory: true, forceDiscrete: true, cursorStart: nextCursor, cursorEnd: nextCursor },
-    );
-    editorRef.current?.focusGlobalRange(nextCursor, nextCursor);
-  };
 
   const handleCopyEditorText = async (selected: string) => {
     if (!selected) return;
@@ -1332,46 +1319,13 @@ export default function App() {
     if (!activeNote) return;
     e.preventDefault();
     const selectedText = activeNote.content.slice(selStart, selEnd);
-    const wordOcc = extractWordAtPosition(activeNote.content, selStart);
     const cursorDiagram = findConceptDiagramAtCursor(activeNote.content, selStart);
 
-    const items: ContextMenuItem[] = [];
-    let hasTopSection = false;
-
-    if (wordOcc && !spellSuppression.suppressed && !isWordValid(wordOcc.word, ignoredWordSet)) {
-      hasTopSection = true;
-      const suggestions = getSpellingSuggestions(wordOcc.word, 3);
-      if (suggestions.length > 0) {
-        suggestions.forEach((sug) => {
-          items.push({
-            id: `fix-${sug}`,
-            label: `Correct spelling: "${sug}"`,
-            icon: <SpellCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />,
-            onSelect: () => handleFixSpellingAt(wordOcc.start, wordOcc.end, sug),
-          });
-        });
-      } else {
-        items.push({
-          id: 'no-suggestions',
-          label: `No suggestions for "${wordOcc.word}"`,
-          disabled: true,
-          onSelect: () => {},
-        });
-      }
-      items.push({
-        id: `ignore-${wordOcc.word}`,
-        label: `Ignore word "${wordOcc.word}"`,
-        icon: <CheckCircle2 className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />,
-        onSelect: () => handleIgnoreSpellingWord(wordOcc.word),
-      });
-    }
-
-    items.push(
+    const items: ContextMenuItem[] = [
       {
         id: 'ctx-copy',
         label: 'Copy',
         shortcut: 'Ctrl+C',
-        dividerBefore: hasTopSection,
         disabled: selectedText.length === 0,
         icon: <Copy className="w-3.5 h-3.5" />,
         onSelect: () => handleCopyEditorText(selectedText),
@@ -1383,9 +1337,6 @@ export default function App() {
         icon: <ClipboardPaste className="w-3.5 h-3.5" />,
         onSelect: () => handlePasteAtCursor(selStart, selEnd),
       },
-    );
-
-    items.push(
       {
         id: 'ctx-highlight',
         label: 'Highlight Selection',
@@ -1408,15 +1359,21 @@ export default function App() {
         icon: <Italic className="w-3.5 h-3.5" />,
         onSelect: () => wrapSelection('*', '*', 'italic'),
       },
-    );
-
-    items.push({
-      id: 'ctx-add-diagram',
-      label: 'Add Concept Diagram',
-      dividerBefore: true,
-      icon: <Shapes className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />,
-      onSelect: handleOpenNewDiagram,
-    });
+      {
+        id: 'ctx-underline',
+        label: 'Underline',
+        shortcut: '<u>text</u>',
+        icon: <Underline className="w-3.5 h-3.5" />,
+        onSelect: () => wrapSelection('<u>', '</u>', 'underlined'),
+      },
+      {
+        id: 'ctx-add-diagram',
+        label: 'Add Concept Diagram',
+        dividerBefore: true,
+        icon: <Shapes className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />,
+        onSelect: handleOpenNewDiagram,
+      },
+    ];
 
     if (cursorDiagram) {
       items.push(
@@ -1434,29 +1391,6 @@ export default function App() {
           onSelect: () => handleDeleteDiagram(cursorDiagram.id),
         },
       );
-    }
-
-    items.push({
-      id: 'ctx-ignore-page-spell',
-      label: ignoredSpellNoteIdSet.has(activeNote.id)
-        ? 'Enable spelling on this page'
-        : 'Ignore spelling on entire page',
-      dividerBefore: true,
-      icon: <SpellCheck className="w-3.5 h-3.5" />,
-      onSelect: () => handleToggleIgnoreSpellingPage(activeNote.id),
-    });
-
-    if (activeNote.folderId) {
-      const targetFolderId = activeNote.folderId;
-      const folderName = folders.find((f) => f.id === targetFolderId)?.name || 'folder';
-      items.push({
-        id: 'ctx-ignore-folder-spell',
-        label: ignoredSpellFolderIdSet.has(targetFolderId)
-          ? `Enable spelling in "${folderName}"`
-          : `Ignore spelling in folder "${folderName}"`,
-        icon: <FolderX className="w-3.5 h-3.5" />,
-        onSelect: () => handleToggleIgnoreSpellingFolder(targetFolderId),
-      });
     }
 
     items.push(
@@ -1478,9 +1412,15 @@ export default function App() {
         onSelect: handleRedo,
       },
       {
+        id: 'ctx-share-note',
+        label: 'Share Note',
+        dividerBefore: true,
+        icon: <Share2 className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />,
+        onSelect: () => setShareTarget({ type: 'note', id: activeNote.id }),
+      },
+      {
         id: 'ctx-print-note',
         label: 'Print Note',
-        dividerBefore: true,
         icon: <Printer className="w-3.5 h-3.5" />,
         onSelect: handlePrintActiveNote,
       },
@@ -1489,7 +1429,7 @@ export default function App() {
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
-      title: wordOcc ? `Word: "${wordOcc.word}"` : 'Editor Actions',
+      title: 'Editor Actions',
       items,
     });
   };
@@ -1724,12 +1664,7 @@ export default function App() {
     );
   }
 
-  const editorFontClass =
-    settings.fontFamily === 'serif'
-      ? 'font-note-serif'
-      : settings.fontFamily === 'mono'
-        ? 'font-note-mono'
-        : 'font-note-sans';
+  const editorFontClass = getEditorFontClass(settings.fontFamily);
 
   const wordCount = activeNote
     ? activeNote.content.trim().split(/\s+/).filter(Boolean).length
@@ -1759,6 +1694,7 @@ export default function App() {
         onDeleteFolder={handleDeleteFolder}
         onPrintFolder={handlePrintFolder}
         onShareFolder={(folderId) => setShareTarget({ type: 'folder', id: folderId })}
+        onShareNote={(noteId) => setShareTarget({ type: 'note', id: noteId })}
         onChangeNoteColor={handleChangeNoteColor}
         onDeleteNote={handleDeleteNote}
         onMoveNote={handleMoveNote}
@@ -1829,7 +1765,7 @@ export default function App() {
                       ? 'Syncing...'
                       : syncStatus === 'offline'
                         ? 'Offline Queued'
-                        : 'E2EE Synced'}
+                        : 'Note Synced'}
               </span>
             </button>
 
@@ -1917,7 +1853,7 @@ export default function App() {
           </div>
         ) : (
           <div className="flex-1 flex flex-col min-h-0">
-            {/* Formatting, Undo/Redo, Spellcheck & View Toolbar */}
+            {/* Formatting, Undo/Redo, Office Tools & View Toolbar */}
             <div className="px-4 2xl:px-8 py-2 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 bg-slate-50/60 dark:bg-slate-900/50 shrink-0">
               <div className="flex flex-wrap items-center gap-1">
                 <button
@@ -1981,6 +1917,15 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => wrapSelection('<u>', '</u>', 'underlined')}
+                  aria-label="Underline"
+                  title="Underline"
+                  className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800"
+                >
+                  <Underline className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
                   onClick={() => wrapSelection('==', '==', 'highlighted')}
                   aria-label="Highlight text"
                   title="Highlight text"
@@ -1998,15 +1943,67 @@ export default function App() {
                 >
                   <Code className="w-4 h-4" />
                 </button>
+
+                <span className="h-4 w-px bg-slate-200 dark:bg-slate-700 mx-1" aria-hidden="true" />
+
                 <button
                   type="button"
-                  onClick={() => wrapSelection('\n- [ ] ', '', 'Task item')}
+                  onClick={() => insertListPrefix('- ', 'List item')}
+                  aria-label="Bullet list"
+                  title="Bullet list"
+                  className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800"
+                >
+                  <List className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertListPrefix('1. ', 'List item')}
+                  aria-label="Numbered list"
+                  title="Numbered list"
+                  className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800"
+                >
+                  <ListOrdered className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertListPrefix('- [ ] ', 'Task item')}
                   aria-label="Insert checklist"
-                  title="Insert checklist"
+                  title="Checklist"
                   className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800"
                 >
                   <CheckSquare className="w-4 h-4" />
                 </button>
+
+                <span className="h-4 w-px bg-slate-200 dark:bg-slate-700 mx-1" aria-hidden="true" />
+
+                <button
+                  type="button"
+                  onClick={() => handleAlignSelection('left')}
+                  aria-label="Align left"
+                  title="Align left"
+                  className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800"
+                >
+                  <AlignLeft className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAlignSelection('center')}
+                  aria-label="Align center"
+                  title="Align center"
+                  className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800"
+                >
+                  <AlignCenter className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAlignSelection('right')}
+                  aria-label="Align right"
+                  title="Align right"
+                  className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800"
+                >
+                  <AlignRight className="w-4 h-4" />
+                </button>
+
                 <button
                   type="button"
                   onClick={() =>
@@ -2033,29 +2030,6 @@ export default function App() {
                   <Shapes className="w-3.5 h-3.5" />
                   Add Concept Diagram
                 </button>
-
-                <button
-                  type="button"
-                  onClick={() => setSpellPanelOpen((prev) => !prev)}
-                  aria-expanded={spellPanelOpen}
-                  aria-label="Toggle spelling assistant"
-                  className={`inline-flex items-center justify-center gap-1.5 w-[118px] px-2.5 py-1 rounded-md border text-xs font-medium whitespace-nowrap shrink-0 ${
-                    spellPanelOpen
-                      ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900'
-                      : spellingIssues.length > 0
-                        ? 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-200'
-                        : 'border-transparent text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <SpellCheck className="w-3.5 h-3.5 shrink-0" />
-                  <span className="tabular-nums">
-                    {spellSuppression.suppressed
-                      ? 'Spelling Off'
-                      : spellingIssues.length > 0
-                        ? `Spelling (${spellingIssues.length})`
-                        : 'Spelling'}
-                  </span>
-                </button>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -2071,8 +2045,12 @@ export default function App() {
                   className="px-2 py-1 text-xs rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200"
                 >
                   <option value="sans">Sans (Jakarta)</option>
+                  <option value="arial">Arial</option>
                   <option value="serif">Serif (Source)</option>
                   <option value="mono">Mono (JetBrains)</option>
+                  <option value="khmer_battambang">Khmer OS Battambang</option>
+                  <option value="khmer_siemreap">Khmer OS Siemreap</option>
+                  <option value="khmer_muollight">Khmer OS Muol Light</option>
                 </select>
 
                 <select
@@ -2110,109 +2088,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-
-            {/* Lightweight Spellcheck Drawer (debounced & non-flickering + Ignore Page / Folder controls) */}
-            {spellPanelOpen && (
-              <div
-                aria-label="Spelling assistant"
-                className="px-6 2xl:px-8 py-2.5 border-b border-slate-200 dark:border-slate-800 bg-amber-50/40 dark:bg-slate-900 flex items-start justify-between gap-3 text-xs shrink-0"
-              >
-                <div className="flex-1 min-w-0 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {spellSuppression.suppressed ? (
-                      <span className="text-slate-600 dark:text-slate-300 font-medium">
-                        Spellcheck is ignored for{' '}
-                        {spellSuppression.reason === 'folder'
-                          ? `folder "${folders.find((f) => f.id === spellSuppression.folderId)?.name ?? 'Folder'}"`
-                          : 'this entire page'}
-                        .
-                      </span>
-                    ) : spellingIssues.length === 0 ? (
-                      <span className="text-emerald-700 dark:text-emerald-400 font-medium">
-                        No spelling issues found ({ignoredWords.length} ignored words).
-                      </span>
-                    ) : (
-                      <span className="font-semibold text-slate-700 dark:text-slate-200">
-                        Review spelling (or right-click any word):
-                      </span>
-                    )}
-
-                    <div className="flex flex-wrap items-center gap-1.5 sm:ml-auto">
-                      <button
-                        type="button"
-                        onClick={() => handleToggleIgnoreSpellingPage(activeNote.id)}
-                        className={`px-2 py-0.5 rounded border text-[11px] font-medium ${
-                          ignoredSpellNoteIdSet.has(activeNote.id)
-                            ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-200'
-                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                        }`}
-                      >
-                        {ignoredSpellNoteIdSet.has(activeNote.id)
-                          ? 'Re-enable Page Spelling'
-                          : 'Ignore Entire Page'}
-                      </button>
-
-                      {activeNote.folderId && (
-                        <button
-                          type="button"
-                          onClick={() => handleToggleIgnoreSpellingFolder(activeNote.folderId!)}
-                          className={`px-2 py-0.5 rounded border text-[11px] font-medium ${
-                            ignoredSpellFolderIdSet.has(activeNote.folderId)
-                              ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-200'
-                              : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                          }`}
-                        >
-                          {ignoredSpellFolderIdSet.has(activeNote.folderId)
-                            ? 'Re-enable Folder Spelling'
-                            : 'Ignore Entire Folder'}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {!spellSuppression.suppressed && spellingIssues.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {spellingIssues.slice(0, 6).map((issue, idx) => (
-                        <div
-                          key={`${issue.word}-${issue.start}-${idx}`}
-                          className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950"
-                        >
-                          <span className="font-medium text-rose-600 dark:text-rose-400 underline decoration-wavy">
-                            {issue.word}
-                          </span>
-                          {issue.suggestions.slice(0, 2).map((sug) => (
-                            <button
-                              key={sug}
-                              type="button"
-                              onClick={() => handleFixSpellingAt(issue.start, issue.end, sug)}
-                              className="px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900 font-medium"
-                            >
-                              {sug}
-                            </button>
-                          ))}
-                          <button
-                            type="button"
-                            onClick={() => handleIgnoreSpellingWord(issue.word)}
-                            className="px-1.5 py-0.5 rounded text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
-                          >
-                            Ignore
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setSpellPanelOpen(false)}
-                  aria-label="Close spelling assistant"
-                  className="p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 shrink-0"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
 
             {/* Note Title, File Color, Folder Assignment & Tags Header */}
             <div className="px-6 2xl:px-8 py-3 border-b border-slate-200 dark:border-slate-800 space-y-2.5 bg-white dark:bg-slate-950 shrink-0">
@@ -2469,7 +2344,7 @@ export default function App() {
         )}
 
         <footer className="px-4 2xl:px-8 py-1.5 border-t border-slate-200/80 dark:border-slate-800/80 bg-white dark:bg-slate-950 flex items-center justify-end shrink-0">
-          <span className="text-[11px] text-slate-400 dark:text-slate-500">
+          <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
             opennote by calz
           </span>
         </footer>

@@ -58,3 +58,25 @@ test('toggleChecklistLine flips checkbox state on target line', () => {
   assert.equal(toggled, '- [x] First\n- [x] Second');
   assert.equal(toggleChecklistLine(toggled, 1), '- [x] First\n- [ ] Second');
 });
+
+test('parseMarkdownBlocks and applyAlignmentToMarkdown support aligned blocks and Khmer/Arial font classes', async () => {
+  const { applyAlignmentToMarkdown, getEditorFontClass } = await import('./markdown');
+  assert.equal(getEditorFontClass('arial'), 'font-note-arial');
+  assert.equal(getEditorFontClass('khmer_battambang'), 'font-note-khmer-battambang');
+  assert.equal(getEditorFontClass('khmer_siemreap'), 'font-note-khmer-siemreap');
+  assert.equal(getEditorFontClass('khmer_muollight'), 'font-note-khmer-muollight');
+
+  const aligned = applyAlignmentToMarkdown('Hello World', 0, 11, 'center');
+  assert.equal(aligned.content, '<div align="center">\nHello World\n</div>');
+  const blocks = parseMarkdownBlocks(aligned.content);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, 'aligned');
+  if (blocks[0].type === 'aligned') {
+    assert.equal(blocks[0].align, 'center');
+    assert.equal(blocks[0].blocks[0].type, 'paragraph');
+  }
+
+  // Toggling same alignment unwraps cleanly
+  const unwrapped = applyAlignmentToMarkdown(aligned.content, 0, aligned.content.length, 'center');
+  assert.equal(unwrapped.content, 'Hello World');
+});

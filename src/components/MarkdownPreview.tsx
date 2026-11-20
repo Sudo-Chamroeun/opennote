@@ -1,6 +1,6 @@
 import React from 'react';
 import type { ConceptDiagram, EditorFontFamily, ThemeMode } from '../types';
-import { parseMarkdownBlocks } from '../utils/markdown';
+import { getEditorFontClass, parseMarkdownBlocks, type MarkdownBlock } from '../utils/markdown';
 import { ConceptCanvas } from './ConceptCanvas';
 
 interface MarkdownPreviewProps {
@@ -21,9 +21,9 @@ function renderInline(
   onClickWikilink: (title: string) => void,
   onClickTag: (tag: string) => void,
 ): React.ReactNode[] {
-  // Tokenize ==highlight==, **bold**, *italic*, ~~strike~~, `code`, [[wikilink]], [label](url), #tag
+  // Tokenize ==highlight==, **bold**, *italic*, ~~strike~~, <u>underline</u>, `code`, [[wikilink]], [label](url), #tag
   const pattern =
-    /(==[^=]+==|\*\*[^*]+\*\*|\*[^*]+\*|~~[^~]+~~|`[^`]+`|\[\[[^\]]+\]\]|\[[^\]]+\]\([^)]+\)|(?:^|\s)#[a-zA-Z][a-zA-Z0-9_-]{1,31})/g;
+    /(==[^=]+==|\*\*[^*]+\*\*|\*[^*]+\*|~~[^~]+~~|<u>[\s\S]*?<\/u>|`[^`]+`|\[\[[^\]]+\]\]|\[[^\]]+\]\([^)]+\)|(?:^|\s)#[a-zA-Z][a-zA-Z0-9_-]{1,31})/gi;
 
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
@@ -64,6 +64,12 @@ function renderInline(
         <del key={`s-${keyIdx}`} className="line-through text-slate-400">
           {token.slice(2, -2)}
         </del>,
+      );
+    } else if (/^<u>[\s\S]*<\/u>$/i.test(token)) {
+      nodes.push(
+        <u key={`u-${keyIdx}`} className="underline underline-offset-2 decoration-2">
+          {token.slice(3, -4)}
+        </u>,
       );
     } else if (token.startsWith('`') && token.endsWith('`')) {
       nodes.push(
@@ -144,12 +150,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
   onContextMenuDiagram,
 }) => {
   const blocks = parseMarkdownBlocks(content);
-  const fontClass =
-    fontFamily === 'serif'
-      ? 'font-note-serif'
-      : fontFamily === 'mono'
-        ? 'font-note-mono'
-        : 'font-note-sans';
+  const fontClass = getEditorFontClass(fontFamily);
 
   if (blocks.length === 0) {
     return (
@@ -159,13 +160,8 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
     );
   }
 
-  return (
-    <div
-      className={`${fontClass} leading-relaxed text-slate-800 dark:text-slate-200 space-y-4`}
-      style={{ fontSize: `${fontSize}px` }}
-    >
-      {blocks.map((block, index) => {
-        switch (block.type) {
+  const renderBlock = (block: MarkdownBlock, index: number): React.ReactNode => {
+    switch (block.type) {
           case 'heading': {
             const sizeClass =
               block.level === 1
@@ -323,10 +319,31 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
               </div>
             );
 
+          case 'aligned': {
+            const alignClass =
+              block.align === 'center'
+                ? 'text-center'
+                : block.align === 'right'
+                  ? 'text-right'
+                  : 'text-left';
+            return (
+              <div key={index} className={`${alignClass} space-y-3`}>
+                {block.blocks.map((child, cIdx) => renderBlock(child, cIdx))}
+              </div>
+            );
+          }
+
           case 'hr':
             return <hr key={index} className="border-slate-200 dark:border-slate-800 my-4" />;
-        }
-      })}
+    }
+  };
+
+  return (
+    <div
+      className={`${fontClass} leading-relaxed text-slate-800 dark:text-slate-200 space-y-4`}
+      style={{ fontSize: `${fontSize}px` }}
+    >
+      {blocks.map((block, index) => renderBlock(block, index))}
     </div>
   );
 };

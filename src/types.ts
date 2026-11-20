@@ -82,7 +82,14 @@ export interface FolderItem {
   deleted?: boolean;
 }
 
-export type EditorFontFamily = 'sans' | 'serif' | 'mono';
+export type EditorFontFamily =
+  | 'sans'
+  | 'serif'
+  | 'mono'
+  | 'arial'
+  | 'khmer_battambang'
+  | 'khmer_siemreap'
+  | 'khmer_muollight';
 export type EditorViewMode = 'edit' | 'split' | 'preview';
 export type ThemeMode = 'light' | 'dark';
 

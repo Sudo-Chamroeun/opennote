@@ -1,6 +1,6 @@
 import type { ConceptDiagram, FolderItem, NoteItem } from '../types';
 import { SHAPE_COLORS, getAnchorPoint, getNodeCenter, getShapePath } from './diagram';
-import { parseMarkdownBlocks } from './markdown';
+import { parseMarkdownBlocks, type MarkdownBlock } from './markdown';
 
 function escapeHtml(raw: string): string {
   return raw
@@ -16,6 +16,7 @@ function renderInlineHtml(text: string): string {
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+  html = html.replace(/&lt;u&gt;([\s\S]*?)&lt;\/u&gt;/gi, '<u>$1</u>');
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   html = html.replace(/\[\[([^\]]+)\]\]/g, '<span class="wikilink">$1</span>');
   return html;
@@ -103,44 +104,46 @@ function renderConceptSvgHtml(diagram: ConceptDiagram): string {
   </div>`;
 }
 
+function renderBlockHtml(block: MarkdownBlock): string {
+  switch (block.type) {
+    case 'heading':
+      return `<h${block.level}>${renderInlineHtml(block.text)}</h${block.level}>`;
+    case 'paragraph':
+      return `<p>${renderInlineHtml(block.text)}</p>`;
+    case 'blockquote':
+      return `<blockquote>${block.lines.map((l) => `<p>${renderInlineHtml(l)}</p>`).join('')}</blockquote>`;
+    case 'code':
+      return `<pre><code>${escapeHtml(block.code)}</code></pre>`;
+    case 'concept':
+      return renderConceptSvgHtml(block.diagram);
+    case 'list': {
+      const tag = block.ordered ? 'ol' : 'ul';
+      const items = block.items
+        .map((it) =>
+          typeof it.checked === 'boolean'
+            ? `<li class="task">${it.checked ? '&#9745;' : '&#9744;'} ${renderInlineHtml(it.text)}</li>`
+            : `<li>${renderInlineHtml(it.text)}</li>`,
+        )
+        .join('');
+      return `<${tag}>${items}</${tag}>`;
+    }
+    case 'table': {
+      const ths = block.headers.map((h) => `<th>${renderInlineHtml(h)}</th>`).join('');
+      const trs = block.rows
+        .map((row) => `<tr>${row.map((c) => `<td>${renderInlineHtml(c)}</td>`).join('')}</tr>`)
+        .join('');
+      return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+    }
+    case 'aligned':
+      return `<div style="text-align:${block.align};">${block.blocks.map(renderBlockHtml).join('\n')}</div>`;
+    case 'hr':
+      return '<hr />';
+  }
+}
+
 function renderNoteHtml(note: NoteItem): string {
   const blocks = parseMarkdownBlocks(note.content);
-  const bodyHtml = blocks
-    .map((block) => {
-      switch (block.type) {
-        case 'heading':
-          return `<h${block.level}>${renderInlineHtml(block.text)}</h${block.level}>`;
-        case 'paragraph':
-          return `<p>${renderInlineHtml(block.text)}</p>`;
-        case 'blockquote':
-          return `<blockquote>${block.lines.map((l) => `<p>${renderInlineHtml(l)}</p>`).join('')}</blockquote>`;
-        case 'code':
-          return `<pre><code>${escapeHtml(block.code)}</code></pre>`;
-        case 'concept':
-          return renderConceptSvgHtml(block.diagram);
-        case 'list': {
-          const tag = block.ordered ? 'ol' : 'ul';
-          const items = block.items
-            .map((it) =>
-              typeof it.checked === 'boolean'
-                ? `<li class="task">${it.checked ? '&#9745;' : '&#9744;'} ${renderInlineHtml(it.text)}</li>`
-                : `<li>${renderInlineHtml(it.text)}</li>`,
-            )
-            .join('');
-          return `<${tag}>${items}</${tag}>`;
-        }
-        case 'table': {
-          const ths = block.headers.map((h) => `<th>${renderInlineHtml(h)}</th>`).join('');
-          const trs = block.rows
-            .map((row) => `<tr>${row.map((c) => `<td>${renderInlineHtml(c)}</td>`).join('')}</tr>`)
-            .join('');
-          return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
-        }
-        case 'hr':
-          return '<hr />';
-      }
-    })
-    .join('\n');
+  const bodyHtml = blocks.map(renderBlockHtml).join('\n');
 
   const tagsLine = note.tags.length
     ? `<div class="note-meta">Tags: ${note.tags.map((t) => `#${escapeHtml(t)}`).join(' · ')}</div>`

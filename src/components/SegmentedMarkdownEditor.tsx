@@ -352,7 +352,7 @@ export const SegmentedMarkdownEditor = forwardRef<
                 }}
                 placeholder={
                   isOnlySegment
-                    ? 'Write Markdown here... Right-click for copy, paste, spelling & diagram actions.'
+                    ? 'Write Markdown here... Right-click for copy, paste, formatting & diagram actions.'
                     : isLastSegment
                       ? 'Continue text here...'
                       : 'Write Markdown here...'

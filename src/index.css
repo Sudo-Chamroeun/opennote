@@ -31,6 +31,22 @@
   font-family: var(--font-mono);
 }
 
+.font-note-arial {
+  font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+}
+
+.font-note-khmer-battambang {
+  font-family: "Khmer OS Battambang", "Battambang", "Noto Sans Khmer", sans-serif;
+}
+
+.font-note-khmer-siemreap {
+  font-family: "Khmer OS Siemreap", "Siemreap", "Noto Sans Khmer", sans-serif;
+}
+
+.font-note-khmer-muollight {
+  font-family: "Khmer OS Muol Light", "Khmer OS Moul Light", "Khmer OS Muol", "Moul", "Battambang", sans-serif;
+}
+
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }

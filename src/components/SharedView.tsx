@@ -573,7 +573,9 @@ export const SharedView: React.FC<SharedViewProps> = ({ token, theme, onToggleTh
         )}
 
         <footer className="px-4 2xl:px-8 py-1.5 border-t border-slate-200/80 dark:border-slate-800/80 bg-white dark:bg-slate-950 flex items-center justify-end shrink-0">
-          <span className="text-[11px] text-slate-400 dark:text-slate-500">opennote by calz</span>
+          <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+            opennote by calz
+          </span>
         </footer>
       </div>
 

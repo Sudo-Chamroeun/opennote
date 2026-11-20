@@ -43,6 +43,7 @@ interface SidebarProps {
   onDeleteFolder: (folderId: string) => void;
   onPrintFolder: (folderId: string) => void;
   onShareFolder: (folderId: string) => void;
+  onShareNote: (noteId: string) => void;
   onChangeNoteColor: (noteId: string, color: FolderColor | undefined) => void;
   onDeleteNote: (noteId: string) => void;
   onMoveNote: (noteId: string, targetFolderId: string | null) => void;
@@ -69,12 +70,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onDeleteFolder,
   onPrintFolder,
   onShareFolder,
+  onShareNote,
   onChangeNoteColor,
   onDeleteNote,
   onMoveNote,
   onMoveFolder,
 }) => {
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({
+    fld_introduction: true,
     fld_architecture: true,
     fld_backend: true,
     fld_projects: true,
@@ -184,6 +187,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </button>
 
           <div className="flex lg:hidden lg:group-hover:flex lg:focus-within:flex items-center gap-0.5 shrink-0">
+            <button
+              type="button"
+              aria-label={`Share note '${note.title || 'Untitled Note'}'`}
+              title="Share note over HTTPS"
+              onClick={(e) => {
+                e.stopPropagation();
+                onShareNote(note.id);
+              }}
+              className="p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+            </button>
             <button
               type="button"
               aria-label={`Customize color for file '${note.title || 'Untitled Note'}'`}
