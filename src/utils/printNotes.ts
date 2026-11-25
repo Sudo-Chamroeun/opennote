@@ -1,5 +1,5 @@
 import type { ConceptDiagram, FolderItem, NoteItem } from '../types';
-import { SHAPE_COLORS, getAnchorPoint, getNodeCenter, getShapePath } from './diagram';
+import { SHAPE_COLORS, getShapePath, resolveEdgeGeometry } from './diagram';
 import { parseMarkdownBlocks, type MarkdownBlock } from './markdown';
 
 function escapeHtml(raw: string): string {
@@ -23,7 +23,7 @@ function renderInlineHtml(text: string): string {
 }
 
 function renderConceptSvgHtml(diagram: ConceptDiagram): string {
-  if (diagram.nodes.length === 0) return '';
+  if (diagram.nodes.length === 0 && diagram.edges.length === 0) return '';
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -34,25 +34,46 @@ function renderConceptSvgHtml(diagram: ConceptDiagram): string {
     maxX = Math.max(maxX, n.x + n.width);
     maxY = Math.max(maxY, n.y + n.height);
   }
-  const pad = 28;
-  const vx = Math.max(0, minX - pad);
-  const vy = Math.max(0, minY - pad);
-  const vw = Math.max(320, maxX - vx + pad);
-  const vh = Math.max(180, maxY - vy + pad);
   const nodeMap = new Map(diagram.nodes.map((n) => [n.id, n]));
+  const resolvedEdges = diagram.edges
+    .map((edge) => ({ edge, geom: resolveEdgeGeometry(edge, nodeMap) }))
+    .filter((entry): entry is { edge: (typeof diagram.edges)[number]; geom: NonNullable<ReturnType<typeof resolveEdgeGeometry>> } => entry.geom !== null);
+
+  for (const { edge, geom } of resolvedEdges) {
+    for (const pt of geom.polylinePoints) {
+      minX = Math.min(minX, pt.x);
+      minY = Math.min(minY, pt.y);
+      maxX = Math.max(maxX, pt.x);
+      maxY = Math.max(maxY, pt.y);
+    }
+    if (edge.label) {
+      const halfLabelW = Math.max(24, edge.label.length * 3.6 + 12);
+      minX = Math.min(minX, geom.labelPoint.x - halfLabelW);
+      maxX = Math.max(maxX, geom.labelPoint.x + halfLabelW);
+      minY = Math.min(minY, geom.labelPoint.y - 14);
+      maxY = Math.max(maxY, geom.labelPoint.y + 14);
+    }
+  }
+  if (!Number.isFinite(minX)) {
+    minX = 0;
+    minY = 0;
+    maxX = 320;
+    maxY = 180;
+  }
+
+  const pad = 28;
+  const vx = Math.floor(minX - pad);
+  const vy = Math.floor(minY - pad);
+  const vw = Math.max(320, Math.ceil(maxX - vx + pad));
+  const vh = Math.max(180, Math.ceil(maxY - vy + pad));
   const markerId = `print-arrow-${diagram.id.replace(/[^a-zA-Z0-9_-]/g, '')}`;
 
-  const edgesSvg = diagram.edges
-    .map((edge) => {
-      const fromNode = nodeMap.get(edge.fromId);
-      const toNode = nodeMap.get(edge.toId);
-      if (!fromNode || !toNode) return '';
-      const p1 = getAnchorPoint(fromNode, getNodeCenter(toNode));
-      const p2 = getAnchorPoint(toNode, getNodeCenter(fromNode));
+  const edgesSvg = resolvedEdges
+    .map(({ edge, geom }) => {
       const palette = SHAPE_COLORS[edge.color ?? 'slate'] ?? SHAPE_COLORS.slate;
       const stroke = palette.strokeLight;
-      const midX = (p1.x + p2.x) / 2;
-      const midY = (p1.y + p2.y) / 2;
+      const midX = geom.labelPoint.x;
+      const midY = geom.labelPoint.y;
       const dash = edge.style === 'dashed' ? 'stroke-dasharray="6 4"' : '';
       const labelSvg = edge.label
         ? `<g transform="translate(${midX}, ${midY})">
@@ -60,9 +81,9 @@ function renderConceptSvgHtml(diagram: ConceptDiagram): string {
              <text text-anchor="middle" dominant-baseline="central" font-size="11" font-weight="500" fill="#1e293b">${escapeHtml(edge.label)}</text>
            </g>`
         : '';
-      return `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="${stroke}" stroke-width="1.8" ${dash} ${
+      return `<path d="${geom.svgPath}" fill="none" stroke="${stroke}" stroke-width="1.8" stroke-linejoin="round" ${dash} ${
         edge.arrowEnd ? `marker-end="url(#${markerId})"` : ''
-      } />${labelSvg}`;
+      } ${edge.arrowStart ? `marker-start="url(#${markerId})"` : ''} />${labelSvg}`;
     })
     .join('');
 
@@ -98,8 +119,8 @@ function renderConceptSvgHtml(diagram: ConceptDiagram): string {
           <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#475569" />
         </marker>
       </defs>
-      ${edgesSvg}
       ${nodesSvg}
+      ${edgesSvg}
     </svg>
   </div>`;
 }
@@ -118,14 +139,19 @@ function renderBlockHtml(block: MarkdownBlock): string {
       return renderConceptSvgHtml(block.diagram);
     case 'list': {
       const tag = block.ordered ? 'ol' : 'ul';
+      const startAttr =
+        block.ordered && block.items[0]?.num !== undefined ? ` start="${block.items[0].num}"` : '';
       const items = block.items
-        .map((it) =>
-          typeof it.checked === 'boolean'
-            ? `<li class="task">${it.checked ? '&#9745;' : '&#9744;'} ${renderInlineHtml(it.text)}</li>`
-            : `<li>${renderInlineHtml(it.text)}</li>`,
-        )
+        .map((it) => {
+          if (typeof it.checked === 'boolean') {
+            return `<li class="task">${it.checked ? '&#9745;' : '&#9744;'} ${renderInlineHtml(it.text)}</li>`;
+          }
+          const valueAttr =
+            block.ordered && it.num !== undefined ? ` value="${it.num}"` : '';
+          return `<li${valueAttr}>${renderInlineHtml(it.text)}</li>`;
+        })
         .join('');
-      return `<${tag}>${items}</${tag}>`;
+      return `<${tag}${startAttr}>${items}</${tag}>`;
     }
     case 'table': {
       const ths = block.headers.map((h) => `<th>${renderInlineHtml(h)}</th>`).join('');

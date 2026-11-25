@@ -558,6 +558,7 @@ async function startServer() {
   const mcpHandlers = createMcpRouterHandlers(store);
   app.get('/api/mcp', mcpHandlers.handleGet);
   app.post('/api/mcp', mcpHandlers.handlePost);
+  app.delete('/api/mcp', mcpHandlers.handleDelete);
 
   // Frontend serving
   if (!isProduction) {

@@ -80,3 +80,36 @@ test('parseMarkdownBlocks and applyAlignmentToMarkdown support aligned blocks an
   const unwrapped = applyAlignmentToMarkdown(aligned.content, 0, aligned.content.length, 'center');
   assert.equal(unwrapped.content, 'Hello World');
 });
+
+test('parseMarkdownBlocks preserves explicit ordered list numbers (1, 2, 4 and 4) across blocks', async () => {
+  const { getNextOrderedListPrefix } = await import('./markdown');
+  const md = [
+    '4. Standalone fourth item',
+    '',
+    '1. First item',
+    '2. Second item',
+    '4. Fourth item',
+    '',
+    '- Sub note',
+    '',
+    '5. Fifth item after bullet',
+  ].join('\n');
+
+  const blocks = parseMarkdownBlocks(md);
+  const lists = blocks.filter((b): b is Extract<typeof b, { type: 'list' }> => b.type === 'list');
+  assert.equal(lists.length, 4);
+
+  assert.equal(lists[0].ordered, true);
+  assert.deepEqual(lists[0].items.map((it) => it.num), [4]);
+
+  assert.equal(lists[1].ordered, true);
+  assert.deepEqual(lists[1].items.map((it) => it.num), [1, 2, 4]);
+
+  assert.equal(lists[2].ordered, false);
+
+  assert.equal(lists[3].ordered, true);
+  assert.deepEqual(lists[3].items.map((it) => it.num), [5]);
+
+  assert.equal(getNextOrderedListPrefix('1. One\n2. Two\n', '1. One\n2. Two\n'.length), '3. ');
+  assert.equal(getNextOrderedListPrefix('Plain paragraph\n', 'Plain paragraph\n'.length), '1. ');
+});

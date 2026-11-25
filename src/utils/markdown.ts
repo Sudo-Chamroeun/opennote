@@ -9,7 +9,7 @@ export type MarkdownBlock =
   | { type: 'blockquote'; lines: string[] }
   | { type: 'code'; lang: string; code: string }
   | { type: 'concept'; diagram: ConceptDiagram }
-  | { type: 'list'; ordered: boolean; items: Array<{ text: string; checked?: boolean; lineIndex: number }> }
+  | { type: 'list'; ordered: boolean; items: Array<{ text: string; checked?: boolean; num?: number; lineIndex: number }> }
   | { type: 'table'; headers: string[]; rows: string[][] }
   | { type: 'aligned'; align: TextAlignment; blocks: MarkdownBlock[] }
   | { type: 'hr' };
@@ -201,11 +201,16 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
     }
 
     // Ordered list
-    if (/^\s*\d+\.\s+/.test(line)) {
-      const items: Array<{ text: string; checked?: boolean; lineIndex: number }> = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+    const orderedMatch = line.match(/^\s*(\d+)\.\s+(.*)$/);
+    if (orderedMatch) {
+      const items: Array<{ text: string; checked?: boolean; num?: number; lineIndex: number }> = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^\s*(\d+)\.\s+(.*)$/);
+        if (!m) break;
+        const parsedNum = Number.parseInt(m[1], 10);
         items.push({
-          text: lines[i].replace(/^\s*\d+\.\s+/, ''),
+          text: m[2],
+          num: Number.isFinite(parsedNum) ? parsedNum : items.length + 1,
           lineIndex: i,
         });
         i += 1;
@@ -283,4 +288,22 @@ export function applyAlignmentToMarkdown(
   const cursorStart = replaceFrom;
   const cursorEnd = replaceFrom + replacement.length;
   return { content, cursorStart, cursorEnd };
+}
+
+export function getNextOrderedListPrefix(markdown: string, cursorStart: number): string {
+  const before = markdown.slice(0, Math.max(0, Math.min(cursorStart, markdown.length)));
+  const lines = before.replace(/\r\n/g, '\n').split('\n');
+  for (let idx = lines.length - 1; idx >= 0; idx -= 1) {
+    const trimmed = lines[idx].trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/^(\d+)\.\s*/);
+    if (match) {
+      const nextNum = Number.parseInt(match[1], 10) + 1;
+      if (Number.isFinite(nextNum) && nextNum > 0) {
+        return `${nextNum}. `;
+      }
+    }
+    break;
+  }
+  return '1. ';
 }

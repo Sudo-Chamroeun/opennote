@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  Download,
   FilePlus2,
   FileText,
   Folder,
@@ -14,6 +15,7 @@ import {
   Search,
   Share2,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
 import type { FolderColor, FolderItem, NoteItem } from '../types';
@@ -44,6 +46,9 @@ interface SidebarProps {
   onPrintFolder: (folderId: string) => void;
   onShareFolder: (folderId: string) => void;
   onShareNote: (noteId: string) => void;
+  onExportFolder: (folderId: string) => void;
+  onExportNote: (noteId: string) => void;
+  onOpenImportExport: (mode: 'import' | 'export') => void;
   onChangeNoteColor: (noteId: string, color: FolderColor | undefined) => void;
   onDeleteNote: (noteId: string) => void;
   onMoveNote: (noteId: string, targetFolderId: string | null) => void;
@@ -71,6 +76,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onPrintFolder,
   onShareFolder,
   onShareNote,
+  onExportFolder,
+  onExportNote,
+  onOpenImportExport,
   onChangeNoteColor,
   onDeleteNote,
   onMoveNote,
@@ -198,6 +206,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
               className="p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
             >
               <Share2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              aria-label={`Export note '${note.title || 'Untitled Note'}'`}
+              title="Export note"
+              onClick={(e) => {
+                e.stopPropagation();
+                onExportNote(note.id);
+              }}
+              className="p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+            >
+              <Download className="w-3.5 h-3.5" />
             </button>
             <button
               type="button"
@@ -427,6 +447,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </button>
             <button
               type="button"
+              aria-label={`Export folder '${branch.folder.name}'`}
+              title="Export folder"
+              onClick={(e) => {
+                e.stopPropagation();
+                onExportFolder(branch.folder.id);
+              }}
+              className="p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
               aria-label={`Print folder '${branch.folder.name}'`}
               title="Print folder"
               onClick={(e) => {
@@ -523,6 +555,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
               className="p-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
             >
               <FolderPlus className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenImportExport('import')}
+              aria-label="Import folder or notes"
+              title="Import (.opennote.json / .md)"
+              className="p-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
+            >
+              <Upload className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenImportExport('export')}
+              aria-label="Export folder or notes"
+              title="Export notes or folders"
+              className="p-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
+            >
+              <Download className="w-4 h-4" />
             </button>
             <button
               type="button"

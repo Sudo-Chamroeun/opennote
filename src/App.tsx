@@ -11,6 +11,7 @@ import {
   Code,
   Copy,
   Edit3,
+  FolderArchive,
   Heading1,
   Heading2,
   Highlighter,
@@ -38,6 +39,10 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { AuthGate } from './components/AuthGate';
 import { ConceptCanvas } from './components/ConceptCanvas';
 import { ContextMenu, type ContextMenuItem } from './components/ContextMenu';
+import {
+  ImportExportModal,
+  type ImportExportInitialState,
+} from './components/ImportExportModal';
 import { MarkdownPreview } from './components/MarkdownPreview';
 import { McpModal } from './components/McpModal';
 import {
@@ -84,6 +89,7 @@ import {
 import {
   applyAlignmentToMarkdown,
   getEditorFontClass,
+  getNextOrderedListPrefix,
   toggleChecklistLine,
   type TextAlignment,
 } from './utils/markdown';
@@ -96,6 +102,10 @@ import {
 } from './utils/offlineStore';
 import { collectFolderNotesRecursive, printNotes } from './utils/printNotes';
 import { createSeedWorkspace } from './utils/seedVault';
+import {
+  materializeImportedItems,
+  type ParsedImportBundle,
+} from './utils/transfer';
 import {
   FOLDER_COLORS,
   collectShareSnapshot,
@@ -257,6 +267,7 @@ export default function App() {
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mcpModalOpen, setMcpModalOpen] = useState(false);
+  const [importExportState, setImportExportState] = useState<ImportExportInitialState | null>(null);
   const [shareTarget, setShareTarget] = useState<{ type: 'note' | 'folder'; id: string } | null>(null);
   const [userShares, setUserShares] = useState<ShareLinkInfo[]>([]);
   const [editingDiagram, setEditingDiagram] = useState<ConceptDiagram | null>(null);
@@ -1095,6 +1106,56 @@ export default function App() {
     persistLocal(notesRef.current, nextFolders, nextPending);
   };
 
+  const handleImportBundle = (
+    bundle: ParsedImportBundle,
+    targetParentFolderId: string | null,
+  ) => {
+    const materialized = materializeImportedItems(
+      bundle,
+      targetParentFolderId,
+      foldersRef.current,
+    );
+    if (materialized.folders.length === 0 && materialized.notes.length === 0) {
+      return;
+    }
+
+    const nextFolders = [...foldersRef.current, ...materialized.folders];
+    const nextNotes = [...materialized.notes, ...notesRef.current];
+    const nextPending: PendingSyncState = {
+      ...pendingRef.current,
+      dirtyFolderIds: Array.from(
+        new Set([
+          ...pendingRef.current.dirtyFolderIds,
+          ...materialized.folders.map((f) => f.id),
+        ]),
+      ),
+      dirtyNoteIds: Array.from(
+        new Set([
+          ...pendingRef.current.dirtyNoteIds,
+          ...materialized.notes.map((n) => n.id),
+        ]),
+      ),
+    };
+
+    foldersRef.current = nextFolders;
+    notesRef.current = nextNotes;
+    pendingRef.current = nextPending;
+    setFolders(nextFolders);
+    setNotes(nextNotes);
+    setPending(nextPending);
+    if (materialized.notes[0]) {
+      setActiveNoteId(materialized.notes[0].id);
+    }
+    persistLocal(nextNotes, nextFolders, nextPending);
+    showNotice(
+      `Imported ${materialized.folders.length} ${
+        materialized.folders.length === 1 ? 'folder' : 'folders'
+      } and ${materialized.notes.length} ${
+        materialized.notes.length === 1 ? 'note' : 'notes'
+      }.`,
+    );
+  };
+
   const wrapSelection = (before: string, after = '', placeholder = 'text') => {
     if (!activeNote) return;
     const sel = editorRef.current?.getGlobalSelection();
@@ -1525,13 +1586,13 @@ export default function App() {
 
   const handleSyncMcpBridge = async (): Promise<number> => {
     if (!vaultCtx?.session) return 0;
-    const folderMap = new Map(folders.filter((f) => !f.deleted).map((f) => [f.id, f]));
+    const folderMap = new Map(foldersRef.current.filter((f) => !f.deleted).map((f) => [f.id, f]));
     const buildPath = (folderId: string | null) => {
       const chain = getFolderBreadcrumbs(Array.from(folderMap.values()), folderId);
       return chain.map((c) => c.name).join('/') || '/';
     };
 
-    const shared = notes
+    const shared = notesRef.current
       .filter((n) => !n.deleted && n.exposeToMcp)
       .map((n) => ({
         id: n.id,
@@ -1695,6 +1756,23 @@ export default function App() {
         onPrintFolder={handlePrintFolder}
         onShareFolder={(folderId) => setShareTarget({ type: 'folder', id: folderId })}
         onShareNote={(noteId) => setShareTarget({ type: 'note', id: noteId })}
+        onExportFolder={(folderId) =>
+          setImportExportState({ tab: 'export', scope: 'folder', targetId: folderId })
+        }
+        onExportNote={(noteId) =>
+          setImportExportState({ tab: 'export', scope: 'note', targetId: noteId })
+        }
+        onOpenImportExport={(mode) => {
+          if (mode === 'import') {
+            setImportExportState({ tab: 'import', targetFolderId: activeNote?.folderId ?? null });
+          } else {
+            setImportExportState({
+              tab: 'export',
+              scope: activeNote ? 'note' : 'vault',
+              targetId: activeNote?.id ?? null,
+            });
+          }
+        }}
         onChangeNoteColor={handleChangeNoteColor}
         onDeleteNote={handleDeleteNote}
         onMoveNote={handleMoveNote}
@@ -1793,6 +1871,23 @@ export default function App() {
                 </button>
               </>
             )}
+
+            <button
+              type="button"
+              onClick={() =>
+                setImportExportState({
+                  tab: 'export',
+                  scope: activeNote ? 'note' : 'vault',
+                  targetId: activeNote?.id ?? null,
+                })
+              }
+              aria-label="Import or export notes and folders"
+              title="Import / Export notes & folders"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+            >
+              <FolderArchive className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+              <span className="hidden xl:inline">Import / Export</span>
+            </button>
 
             <button
               type="button"
@@ -1957,7 +2052,14 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => insertListPrefix('1. ', 'List item')}
+                  onClick={() => {
+                    const sel = editorRef.current?.getGlobalSelection();
+                    const prefix = getNextOrderedListPrefix(
+                      activeNote.content,
+                      sel?.start ?? activeNote.content.length,
+                    );
+                    insertListPrefix(prefix, 'List item');
+                  }}
                   aria-label="Numbered list"
                   title="Numbered list"
                   className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800"
@@ -2427,6 +2529,7 @@ export default function App() {
         isOpen={mcpModalOpen}
         onClose={() => setMcpModalOpen(false)}
         session={vaultCtx.session}
+        folders={folders}
         notes={notes}
         onToggleNoteMcp={(noteId) =>
           mutateNote(noteId, (prev) => ({
@@ -2436,6 +2539,32 @@ export default function App() {
             version: prev.version + 1,
           }))
         }
+        onBatchSetNotesMcp={(noteIds, expose) => {
+          const targetSet = new Set(noteIds);
+          if (targetSet.size === 0) return;
+          const now = Date.now();
+          const changedIds: string[] = [];
+          const nextNotes = notesRef.current.map((n) => {
+            if (!targetSet.has(n.id) || Boolean(n.exposeToMcp) === expose) return n;
+            changedIds.push(n.id);
+            return {
+              ...n,
+              exposeToMcp: expose,
+              updatedAt: now,
+              version: n.version + 1,
+            };
+          });
+          if (changedIds.length === 0) return;
+          const nextPending: PendingSyncState = {
+            ...pendingRef.current,
+            dirtyNoteIds: Array.from(new Set([...pendingRef.current.dirtyNoteIds, ...changedIds])),
+          };
+          notesRef.current = nextNotes;
+          pendingRef.current = nextPending;
+          setNotes(nextNotes);
+          setPending(nextPending);
+          persistLocal(nextNotes, foldersRef.current, nextPending);
+        }}
         onSyncMcpBridge={handleSyncMcpBridge}
       />
 
@@ -2462,6 +2591,17 @@ export default function App() {
           setUserShares((prev) => prev.filter((s) => s.id !== shareId));
         }}
         onClose={() => setShareTarget(null)}
+      />
+
+      <ImportExportModal
+        isOpen={Boolean(importExportState)}
+        initialState={importExportState}
+        folders={folders}
+        notes={notes}
+        activeNoteId={activeNoteId}
+        onImportBundle={handleImportBundle}
+        onExportSuccess={(msg) => showNotice(msg)}
+        onClose={() => setImportExportState(null)}
       />
     </div>
   );

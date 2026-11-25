@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   Circle,
@@ -8,6 +8,7 @@ import {
   Grid,
   Hexagon,
   MousePointer2,
+  MoveUpRight,
   Puzzle,
   RotateCcw,
   Square,
@@ -21,6 +22,8 @@ import type {
   ConceptDiagram,
   DiagramEdge,
   DiagramNode,
+  EdgeAnchorSide,
+  EdgeRouteStyle,
   ShapeColor,
   ShapeKind,
   ThemeMode,
@@ -30,10 +33,12 @@ import {
   SHAPE_COLORS,
   createDefaultNode,
   createEdge,
-  getAnchorPoint,
+  findNearestNodeAnchor,
   getNodeCenter,
   getShapePath,
   getShapeTextBounds,
+  resolveEdgeGeometry,
+  type Point,
 } from '../utils/diagram';
 
 interface ConceptCanvasProps {
@@ -198,6 +203,8 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const inlineNodeInputRef = useRef<HTMLTextAreaElement | null>(null);
   const inlineEdgeInputRef = useRef<HTMLInputElement | null>(null);
+  const suppressNextCanvasClickRef = useRef(false);
+  const frozenDragBoundsRef = useRef<{ minX: number; minY: number; width: number; height: number } | null>(null);
 
   const [tool, setTool] = useState<'select' | 'connect'>('select');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -210,17 +217,39 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [zoom, setZoom] = useState(1);
 
-  const [dragState, setDragState] = useState<{
-    mode: 'move' | 'resize';
-    nodeId: string;
-    startClientX: number;
-    startClientY: number;
-    origX: number;
-    origY: number;
-    origW: number;
-    origH: number;
-    active: boolean;
-  } | null>(null);
+  const [dragState, setDragState] = useState<
+    | {
+        mode: 'move' | 'resize';
+        nodeId: string;
+        startClientX: number;
+        startClientY: number;
+        origX: number;
+        origY: number;
+        origW: number;
+        origH: number;
+        active: boolean;
+      }
+    | {
+        mode: 'edge-end';
+        edgeId: string;
+        end: 'from' | 'to';
+      }
+    | {
+        mode: 'edge-waypoint';
+        edgeId: string;
+        waypointIndex: number;
+      }
+    | {
+        mode: 'draw-arrow';
+        startClientX: number;
+        startClientY: number;
+        startPoint: Point;
+        currentPoint: Point;
+        startNodeId?: string;
+        active: boolean;
+      }
+    | null
+  >(null);
 
   const selectedNode = useMemo(
     () => diagram.nodes.find((n) => n.id === selectedNodeId) ?? null,
@@ -232,37 +261,98 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
     [diagram.edges, selectedEdgeId],
   );
 
-  const viewBounds = useMemo(() => {
-    if (diagram.nodes.length === 0) {
+  const nodeMap = useMemo(
+    () => new Map(diagram.nodes.map((node) => [node.id, node])),
+    [diagram.nodes],
+  );
+
+  const resolvedEdges = useMemo(
+    () =>
+      diagram.edges
+        .map((edge) => ({ edge, geom: resolveEdgeGeometry(edge, nodeMap) }))
+        .filter(
+          (entry): entry is { edge: DiagramEdge; geom: NonNullable<ReturnType<typeof resolveEdgeGeometry>> } =>
+            entry.geom !== null,
+        ),
+    [diagram.edges, nodeMap],
+  );
+
+  const rawViewBounds = useMemo(() => {
+    if (diagram.nodes.length === 0 && resolvedEdges.length === 0) {
       return { minX: 0, minY: 0, width: 720, height: 380 };
     }
-    if (readOnly) {
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (const node of diagram.nodes) {
-        minX = Math.min(minX, node.x);
-        minY = Math.min(minY, node.y);
-        maxX = Math.max(maxX, node.x + node.width);
-        maxY = Math.max(maxY, node.y + node.height);
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const node of diagram.nodes) {
+      minX = Math.min(minX, node.x);
+      minY = Math.min(minY, node.y);
+      maxX = Math.max(maxX, node.x + node.width);
+      maxY = Math.max(maxY, node.y + node.height);
+    }
+    for (const { edge, geom } of resolvedEdges) {
+      for (const pt of geom.polylinePoints) {
+        minX = Math.min(minX, pt.x);
+        minY = Math.min(minY, pt.y);
+        maxX = Math.max(maxX, pt.x);
+        maxY = Math.max(maxY, pt.y);
       }
+      if (edge.label) {
+        const halfLabelW = Math.max(24, edge.label.length * 3.6 + 12);
+        minX = Math.min(minX, geom.labelPoint.x - halfLabelW);
+        maxX = Math.max(maxX, geom.labelPoint.x + halfLabelW);
+        minY = Math.min(minY, geom.labelPoint.y - 14);
+        maxY = Math.max(maxY, geom.labelPoint.y + 14);
+      }
+    }
+    if (!Number.isFinite(minX)) {
+      minX = 0;
+      minY = 0;
+      maxX = 660;
+      maxY = 420;
+    }
+
+    if (readOnly) {
       const pad = 28;
+      const vx = Math.floor(minX - pad);
+      const vy = Math.floor(minY - pad);
       return {
-        minX: Math.max(0, minX - pad),
-        minY: Math.max(0, minY - pad),
-        width: Math.max(320, maxX - Math.max(0, minX - pad) + pad),
-        height: Math.max(180, maxY - Math.max(0, minY - pad) + pad),
+        minX: vx,
+        minY: vy,
+        width: Math.max(320, Math.ceil(maxX - vx + pad)),
+        height: Math.max(180, Math.ceil(maxY - vy + pad)),
       };
     }
-    let maxX = 660;
-    let maxY = 420;
-    for (const node of diagram.nodes) {
-      maxX = Math.max(maxX, node.x + node.width + 64);
-      maxY = Math.max(maxY, node.y + node.height + 64);
-    }
-    return { minX: 0, minY: 0, width: maxX, height: maxY };
-  }, [diagram.nodes, readOnly]);
+
+    const vx = Math.min(0, Math.floor(minX - 36));
+    const vy = Math.min(0, Math.floor(minY - 36));
+    return {
+      minX: vx,
+      minY: vy,
+      width: Math.max(660 - vx, Math.ceil(maxX - vx + 64)),
+      height: Math.max(420 - vy, Math.ceil(maxY - vy + 64)),
+    };
+  }, [diagram.nodes, resolvedEdges, readOnly]);
+
+  if (!dragState) {
+    frozenDragBoundsRef.current = null;
+  } else if (!frozenDragBoundsRef.current) {
+    frozenDragBoundsRef.current = rawViewBounds;
+  }
+  const viewBounds = dragState && frozenDragBoundsRef.current ? frozenDragBoundsRef.current : rawViewBounds;
+
+  const clientToCanvasPoint = useCallback(
+    (clientX: number, clientY: number): Point => {
+      const rect = svgRef.current?.getBoundingClientRect();
+      if (!rect) return { x: 0, y: 0 };
+      return {
+        x: Math.round((clientX - rect.left) / zoom + viewBounds.minX),
+        y: Math.round((clientY - rect.top) / zoom + viewBounds.minY),
+      };
+    },
+    [zoom, viewBounds.minX, viewBounds.minY],
+  );
 
   useEffect(() => {
     if (editingNodeId) {
@@ -288,44 +378,214 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
     }
   }, [editingEdgeId]);
 
+  const diagramRef = useRef(diagram);
+  diagramRef.current = diagram;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const clientToCanvasPointRef = useRef(clientToCanvasPoint);
+  clientToCanvasPointRef.current = clientToCanvasPoint;
+  const dragStateRef = useRef(dragState);
+  dragStateRef.current = dragState;
+
+  const isDragging = Boolean(dragState);
+
   useEffect(() => {
-    if (!dragState || !onChange) return;
+    if (!isDragging || !onChangeRef.current) return;
+
+    const snap = (val: number) => (snapToGrid ? Math.round(val / 12) * 12 : Math.round(val));
 
     const handlePointerMove = (e: PointerEvent) => {
-      const rawDx = e.clientX - dragState.startClientX;
-      const rawDy = e.clientY - dragState.startClientY;
+      const activeDrag = dragStateRef.current;
+      const currentDiagram = diagramRef.current;
+      const emitChange = onChangeRef.current;
+      if (!activeDrag || !emitChange) return;
 
-      if (!dragState.active && Math.hypot(rawDx, rawDy) < 4) {
+      if (activeDrag.mode === 'move' || activeDrag.mode === 'resize') {
+        const rawDx = e.clientX - activeDrag.startClientX;
+        const rawDy = e.clientY - activeDrag.startClientY;
+
+        if (!activeDrag.active && Math.hypot(rawDx, rawDy) < 4) {
+          return;
+        }
+
+        if (!activeDrag.active) {
+          setDragState((prev) => (prev && (prev.mode === 'move' || prev.mode === 'resize') ? { ...prev, active: true } : prev));
+        }
+
+        const dx = rawDx / zoom;
+        const dy = rawDy / zoom;
+
+        let changed = false;
+        const nextNodes = currentDiagram.nodes.map((node) => {
+          if (node.id !== activeDrag.nodeId) return node;
+          if (activeDrag.mode === 'move') {
+            const nx = Math.max(12, snap(activeDrag.origX + dx));
+            const ny = Math.max(16, snap(activeDrag.origY + dy));
+            if (nx === node.x && ny === node.y) return node;
+            changed = true;
+            return { ...node, x: nx, y: ny };
+          }
+          const nw = Math.max(72, snap(activeDrag.origW + dx));
+          const nh = Math.max(40, snap(activeDrag.origH + dy));
+          if (nw === node.width && nh === node.height) return node;
+          changed = true;
+          return { ...node, width: nw, height: nh };
+        });
+        if (changed) {
+          emitChange({ ...currentDiagram, nodes: nextNodes });
+        }
         return;
       }
 
-      if (!dragState.active) {
-        setDragState((prev) => (prev ? { ...prev, active: true } : null));
+      const pt = clientToCanvasPointRef.current(e.clientX, e.clientY);
+
+      if (activeDrag.mode === 'draw-arrow') {
+        const dist = Math.hypot(e.clientX - activeDrag.startClientX, e.clientY - activeDrag.startClientY);
+        setDragState((prev) =>
+          prev && prev.mode === 'draw-arrow'
+            ? { ...prev, currentPoint: pt, active: prev.active || dist >= 6 }
+            : prev,
+        );
+        return;
       }
 
-      const dx = rawDx / zoom;
-      const dy = rawDy / zoom;
-      const snap = (val: number) => (snapToGrid ? Math.round(val / 12) * 12 : Math.round(val));
-
-      const nextNodes = diagram.nodes.map((node) => {
-        if (node.id !== dragState.nodeId) return node;
-        if (dragState.mode === 'move') {
+      if (activeDrag.mode === 'edge-end') {
+        suppressNextCanvasClickRef.current = true;
+        const hit = e.altKey ? null : findNearestNodeAnchor(currentDiagram.nodes, pt, 24);
+        let changed = false;
+        const nextEdges = currentDiagram.edges.map((edge) => {
+          if (edge.id !== activeDrag.edgeId) return edge;
+          if (activeDrag.end === 'from') {
+            if (hit) {
+              if (
+                edge.fromId === hit.nodeId &&
+                edge.fromAnchor === hit.side &&
+                edge.fromOffset === hit.offset &&
+                !edge.fromPoint
+              ) {
+                return edge;
+              }
+              changed = true;
+              return {
+                ...edge,
+                fromId: hit.nodeId,
+                fromAnchor: hit.side,
+                fromOffset: hit.offset,
+                fromPoint: undefined,
+              };
+            }
+            const nx = snap(pt.x);
+            const ny = snap(pt.y);
+            if (!edge.fromId && edge.fromPoint?.x === nx && edge.fromPoint?.y === ny) {
+              return edge;
+            }
+            changed = true;
+            return {
+              ...edge,
+              fromId: undefined,
+              fromAnchor: undefined,
+              fromOffset: undefined,
+              fromPoint: { x: nx, y: ny },
+            };
+          }
+          if (hit) {
+            if (
+              edge.toId === hit.nodeId &&
+              edge.toAnchor === hit.side &&
+              edge.toOffset === hit.offset &&
+              !edge.toPoint
+            ) {
+              return edge;
+            }
+            changed = true;
+            return {
+              ...edge,
+              toId: hit.nodeId,
+              toAnchor: hit.side,
+              toOffset: hit.offset,
+              toPoint: undefined,
+            };
+          }
+          const nx = snap(pt.x);
+          const ny = snap(pt.y);
+          if (!edge.toId && edge.toPoint?.x === nx && edge.toPoint?.y === ny) {
+            return edge;
+          }
+          changed = true;
           return {
-            ...node,
-            x: Math.max(12, snap(dragState.origX + dx)),
-            y: Math.max(16, snap(dragState.origY + dy)),
+            ...edge,
+            toId: undefined,
+            toAnchor: undefined,
+            toOffset: undefined,
+            toPoint: { x: nx, y: ny },
           };
+        });
+        if (changed) {
+          emitChange({ ...currentDiagram, edges: nextEdges });
         }
-        return {
-          ...node,
-          width: Math.max(72, snap(dragState.origW + dx)),
-          height: Math.max(40, snap(dragState.origH + dy)),
-        };
-      });
-      onChange({ ...diagram, nodes: nextNodes });
+        return;
+      }
+
+      if (activeDrag.mode === 'edge-waypoint') {
+        suppressNextCanvasClickRef.current = true;
+        const snappedPt = { x: snap(pt.x), y: snap(pt.y) };
+        let changed = false;
+        const nextEdges = currentDiagram.edges.map((edge) => {
+          if (edge.id !== activeDrag.edgeId) return edge;
+          const prevWps = edge.waypoints ?? [];
+          const prevTarget = prevWps[activeDrag.waypointIndex];
+          if (prevTarget && prevTarget.x === snappedPt.x && prevTarget.y === snappedPt.y) {
+            return edge;
+          }
+          changed = true;
+          const nextWaypoints = [...prevWps];
+          while (nextWaypoints.length <= activeDrag.waypointIndex) {
+            nextWaypoints.push(snappedPt);
+          }
+          nextWaypoints[activeDrag.waypointIndex] = snappedPt;
+          return { ...edge, waypoints: nextWaypoints };
+        });
+        if (changed) {
+          emitChange({ ...currentDiagram, edges: nextEdges });
+        }
+      }
     };
 
-    const handlePointerUp = () => {
+    const handlePointerUp = (e: PointerEvent) => {
+      const activeDrag = dragStateRef.current;
+      const currentDiagram = diagramRef.current;
+      const emitChange = onChangeRef.current;
+      if (
+        activeDrag &&
+        (activeDrag.mode === 'edge-end' ||
+          activeDrag.mode === 'edge-waypoint' ||
+          ((activeDrag.mode === 'move' || activeDrag.mode === 'resize') && activeDrag.active))
+      ) {
+        suppressNextCanvasClickRef.current = true;
+      }
+      if (activeDrag?.mode === 'draw-arrow' && emitChange) {
+        const endPt = clientToCanvasPointRef.current(e.clientX, e.clientY);
+        const dist = Math.hypot(e.clientX - activeDrag.startClientX, e.clientY - activeDrag.startClientY);
+        if (activeDrag.active && dist >= 8) {
+          suppressNextCanvasClickRef.current = true;
+          const fromHit = findNearestNodeAnchor(currentDiagram.nodes, activeDrag.startPoint, 24);
+          const toHit = findNearestNodeAnchor(currentDiagram.nodes, endPt, 24);
+          const fresh = createEdge(fromHit?.nodeId, toHit?.nodeId, '', {
+            ...(fromHit
+              ? { fromAnchor: fromHit.side, fromOffset: fromHit.offset }
+              : { fromPoint: { x: snap(activeDrag.startPoint.x), y: snap(activeDrag.startPoint.y) } }),
+            ...(toHit
+              ? { toAnchor: toHit.side, toOffset: toHit.offset }
+              : { toPoint: { x: snap(endPt.x), y: snap(endPt.y) } }),
+          });
+          emitChange({ ...currentDiagram, edges: [...currentDiagram.edges, fresh] });
+          setSelectedEdgeId(fresh.id);
+          setSelectedNodeId(null);
+          setConnectFromId(null);
+          setTool('select');
+        }
+      }
+      frozenDragBoundsRef.current = null;
       setDragState(null);
     };
 
@@ -335,7 +595,7 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [dragState, diagram, onChange, snapToGrid, zoom]);
+  }, [isDragging, snapToGrid, zoom]);
 
   const updateNode = (id: string, patch: Partial<DiagramNode>) => {
     if (!onChange) return;
@@ -383,6 +643,26 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
     }
   };
 
+  const addFreeArrow = () => {
+    if (!onChange) return;
+    const maxBottom = diagram.nodes.reduce(
+      (max, n) => Math.max(max, n.y + n.height),
+      84,
+    );
+    const offset = (diagram.edges.length % 4) * 24;
+    const startY = Math.round(maxBottom + 36 + offset);
+    const arrow = createEdge(undefined, undefined, '', {
+      fromPoint: { x: 84 + offset, y: startY },
+      toPoint: { x: 264 + offset, y: startY },
+    });
+    onChange({ ...diagram, edges: [...diagram.edges, arrow] });
+    setSelectedEdgeId(arrow.id);
+    setSelectedNodeId(null);
+    setEditingNodeId(null);
+    setEditingEdgeId(null);
+    setTool('select');
+  };
+
   const duplicateSelectedNode = () => {
     if (!onChange || !selectedNode) return;
     const clone: DiagramNode = {
@@ -424,6 +704,17 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
     e.stopPropagation();
 
     if (tool === 'connect') {
+      const pt = clientToCanvasPoint(e.clientX, e.clientY);
+      setDragState({
+        mode: 'draw-arrow',
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startPoint: pt,
+        currentPoint: pt,
+        startNodeId: node.id,
+        active: false,
+      });
+
       if (!connectFromId) {
         setConnectFromId(node.id);
         setSelectedNodeId(node.id);
@@ -438,6 +729,7 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
       }
       setConnectFromId(null);
       setTool('select');
+      setDragState(null);
       return;
     }
 
@@ -458,19 +750,30 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
     });
   };
 
-  const nodeMap = useMemo(
-    () => new Map(diagram.nodes.map((node) => [node.id, node])),
-    [diagram.nodes],
-  );
-
   const markerSuffix = diagram.id.replace(/[^a-zA-Z0-9_-]/g, '');
 
   const svgCanvas = (
     <div
       className="relative flex-1 min-w-0 overflow-auto bg-slate-50/60 dark:bg-slate-950/70"
       style={readOnly ? undefined : { height }}
+      onPointerDown={(e) => {
+        if (readOnly || tool !== 'connect') return;
+        const pt = clientToCanvasPoint(e.clientX, e.clientY);
+        setDragState({
+          mode: 'draw-arrow',
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          startPoint: pt,
+          currentPoint: pt,
+          active: false,
+        });
+      }}
       onClick={() => {
-        if (!readOnly) {
+        if (suppressNextCanvasClickRef.current) {
+          suppressNextCanvasClickRef.current = false;
+          return;
+        }
+        if (!readOnly && tool !== 'connect') {
           commitInlineNodeEdit();
           commitInlineEdgeEdit();
           setSelectedNodeId(null);
@@ -527,121 +830,7 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
           fill={`url(#grid-${markerSuffix})`}
         />
 
-        {/* Edges / Arrows */}
-        {diagram.edges.map((edge) => {
-          const fromNode = nodeMap.get(edge.fromId);
-          const toNode = nodeMap.get(edge.toId);
-          if (!fromNode || !toNode) return null;
-
-          const startCenter = getNodeCenter(fromNode);
-          const endCenter = getNodeCenter(toNode);
-          const p1 = getAnchorPoint(fromNode, endCenter);
-          const p2 = getAnchorPoint(toNode, startCenter);
-
-          const edgeColorKey: ShapeColor = edge.color ?? 'slate';
-          const palette = SHAPE_COLORS[edgeColorKey] ?? SHAPE_COLORS.slate;
-          const stroke =
-            selectedEdgeId === edge.id
-              ? '#4f46e5'
-              : theme === 'dark'
-                ? palette.strokeDark
-                : palette.strokeLight;
-
-          const midX = (p1.x + p2.x) / 2;
-          const midY = (p1.y + p2.y) / 2;
-          const isEditingEdge = !readOnly && editingEdgeId === edge.id;
-
-          return (
-            <g
-              key={edge.id}
-              onClick={(e) => {
-                if (readOnly) return;
-                e.stopPropagation();
-                commitInlineNodeEdit();
-                setSelectedEdgeId(edge.id);
-                setSelectedNodeId(null);
-              }}
-              onDoubleClick={(e) => {
-                if (readOnly) return;
-                e.stopPropagation();
-                setSelectedEdgeId(edge.id);
-                setSelectedNodeId(null);
-                setEditingEdgeId(edge.id);
-                setEditingEdgeDraft(edge.label ?? '');
-              }}
-              className={readOnly ? '' : 'cursor-pointer'}
-            >
-              <line
-                x1={p1.x}
-                y1={p1.y}
-                x2={p2.x}
-                y2={p2.y}
-                stroke="transparent"
-                strokeWidth={16}
-              />
-              <line
-                x1={p1.x}
-                y1={p1.y}
-                x2={p2.x}
-                y2={p2.y}
-                stroke={stroke}
-                strokeWidth={selectedEdgeId === edge.id ? 2.6 : 1.9}
-                strokeDasharray={edge.style === 'dashed' ? '6 4' : undefined}
-                markerEnd={edge.arrowEnd ? `url(#arrow-${markerSuffix}-${edgeColorKey})` : undefined}
-                markerStart={edge.arrowStart ? `url(#arrow-${markerSuffix}-${edgeColorKey})` : undefined}
-              />
-              {isEditingEdge ? (
-                <foreignObject x={midX - 64} y={midY - 14} width={128} height={28}>
-                  <input
-                    ref={inlineEdgeInputRef}
-                    type="text"
-                    aria-label="Edit arrow label inline"
-                    value={editingEdgeDraft}
-                    onChange={(e) => {
-                      setEditingEdgeDraft(e.target.value);
-                      updateEdge(edge.id, { label: e.target.value });
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => {
-                      e.stopPropagation();
-                      if (e.key === 'Enter' || e.key === 'Escape') {
-                        commitInlineEdgeEdit();
-                      }
-                    }}
-                    onBlur={commitInlineEdgeEdit}
-                    className="w-full h-full px-2 text-center text-[11px] font-medium rounded border border-indigo-500 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 outline-none shadow-sm"
-                  />
-                </foreignObject>
-              ) : (
-                edge.label && (
-                  <g transform={`translate(${midX}, ${midY})`}>
-                    <rect
-                      x={-Math.max(24, edge.label.length * 3.6 + 8)}
-                      y={-11}
-                      width={Math.max(48, edge.label.length * 7.2 + 16)}
-                      height={22}
-                      rx={6}
-                      fill={theme === 'dark' ? '#0f172a' : '#ffffff'}
-                      stroke={stroke}
-                      strokeWidth={1}
-                    />
-                    <text
-                      textAnchor="middle"
-                      dominantBaseline="central"
-                      fontSize={11}
-                      fontWeight={500}
-                      fill={theme === 'dark' ? '#e2e8f0' : '#1e293b'}
-                    >
-                      {edge.label}
-                    </text>
-                  </g>
-                )
-              )}
-            </g>
-          );
-        })}
-
-        {/* Shapes & Labels */}
+        {/* Shapes & Labels (rendered beneath arrows so free & container-nested arrows stay visible) */}
         {diagram.nodes.map((node) => {
           const palette = SHAPE_COLORS[node.color] ?? SHAPE_COLORS.slate;
           const textColor = theme === 'dark' ? palette.textDark : palette.textLight;
@@ -749,6 +938,230 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
             </g>
           );
         })}
+
+        {/* Edges / Arrows */}
+        {resolvedEdges.map(({ edge, geom }) => {
+          const edgeColorKey: ShapeColor = edge.color ?? 'slate';
+          const palette = SHAPE_COLORS[edgeColorKey] ?? SHAPE_COLORS.slate;
+          const isSelected = selectedEdgeId === edge.id;
+          const stroke = isSelected
+            ? '#4f46e5'
+            : theme === 'dark'
+              ? palette.strokeDark
+              : palette.strokeLight;
+
+          const midX = geom.labelPoint.x;
+          const midY = geom.labelPoint.y;
+          const isEditingEdge = !readOnly && editingEdgeId === edge.id;
+
+          return (
+            <g
+              key={edge.id}
+              onClick={(e) => {
+                if (readOnly) return;
+                e.stopPropagation();
+                commitInlineNodeEdit();
+                setSelectedEdgeId(edge.id);
+                setSelectedNodeId(null);
+              }}
+              onDoubleClick={(e) => {
+                if (readOnly) return;
+                e.stopPropagation();
+                setSelectedEdgeId(edge.id);
+                setSelectedNodeId(null);
+                setEditingEdgeId(edge.id);
+                setEditingEdgeDraft(edge.label ?? '');
+              }}
+              className={readOnly ? '' : 'cursor-pointer'}
+            >
+              <path
+                d={geom.svgPath}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={16}
+                strokeLinejoin="round"
+              />
+              <path
+                d={geom.svgPath}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={isSelected ? 2.6 : 1.9}
+                strokeLinejoin="round"
+                strokeDasharray={edge.style === 'dashed' ? '6 4' : undefined}
+                markerEnd={edge.arrowEnd ? `url(#arrow-${markerSuffix}-${edgeColorKey})` : undefined}
+                markerStart={edge.arrowStart ? `url(#arrow-${markerSuffix}-${edgeColorKey})` : undefined}
+              />
+              {isEditingEdge ? (
+                <foreignObject x={midX - 64} y={midY - 14} width={128} height={28}>
+                  <input
+                    ref={inlineEdgeInputRef}
+                    type="text"
+                    aria-label="Edit arrow label inline"
+                    value={editingEdgeDraft}
+                    onChange={(e) => {
+                      setEditingEdgeDraft(e.target.value);
+                      updateEdge(edge.id, { label: e.target.value });
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === 'Enter' || e.key === 'Escape') {
+                        commitInlineEdgeEdit();
+                      }
+                    }}
+                    onBlur={commitInlineEdgeEdit}
+                    className="w-full h-full px-2 text-center text-[11px] font-medium rounded border border-indigo-500 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 outline-none shadow-sm"
+                  />
+                </foreignObject>
+              ) : (
+                edge.label && (
+                  <g transform={`translate(${midX}, ${midY})`}>
+                    <rect
+                      x={-Math.max(24, edge.label.length * 3.6 + 8)}
+                      y={-11}
+                      width={Math.max(48, edge.label.length * 7.2 + 16)}
+                      height={22}
+                      rx={6}
+                      fill={theme === 'dark' ? '#0f172a' : '#ffffff'}
+                      stroke={stroke}
+                      strokeWidth={1}
+                    />
+                    <text
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fontSize={11}
+                      fontWeight={500}
+                      fill={theme === 'dark' ? '#e2e8f0' : '#1e293b'}
+                    >
+                      {edge.label}
+                    </text>
+                  </g>
+                )
+              )}
+            </g>
+          );
+        })}
+
+        {/* Selected arrow interactive handles on top of everything */}
+        {!readOnly &&
+          resolvedEdges
+            .filter(({ edge }) => edge.id === selectedEdgeId)
+            .map(({ edge, geom }) => (
+              <g key={`handles-${edge.id}`}>
+                {geom.segmentMidpoints.map((mid, mIdx) => (
+                  <circle
+                    key={`mid-${mIdx}`}
+                    cx={mid.point.x}
+                    cy={mid.point.y}
+                    r={5}
+                    fill="#ffffff"
+                    stroke="#6366f1"
+                    strokeWidth={1.5}
+                    className="cursor-move opacity-85 hover:opacity-100"
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      const currentWps = [...(edge.waypoints ?? [])];
+                      const insertAt = Math.min(mid.index, currentWps.length);
+                      currentWps.splice(insertAt, 0, {
+                        x: Math.round(mid.point.x),
+                        y: Math.round(mid.point.y),
+                      });
+                      updateEdge(edge.id, { waypoints: currentWps });
+                      setDragState({
+                        mode: 'edge-waypoint',
+                        edgeId: edge.id,
+                        waypointIndex: insertAt,
+                      });
+                    }}
+                  >
+                    <title>Drag to bend or route arrow</title>
+                  </circle>
+                ))}
+
+                {geom.controlPoints.map((wp, wpIdx) => (
+                  <rect
+                    key={`wp-${wpIdx}`}
+                    x={wp.x - 5}
+                    y={wp.y - 5}
+                    width={10}
+                    height={10}
+                    rx={2}
+                    transform={`rotate(45 ${wp.x} ${wp.y})`}
+                    fill="#f59e0b"
+                    stroke="#ffffff"
+                    strokeWidth={1.5}
+                    className="cursor-move"
+                    onClick={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      const nextWps = (edge.waypoints ?? []).filter((_, i) => i !== wpIdx);
+                      updateEdge(edge.id, { waypoints: nextWps });
+                    }}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      setDragState({
+                        mode: 'edge-waypoint',
+                        edgeId: edge.id,
+                        waypointIndex: wpIdx,
+                      });
+                    }}
+                  >
+                    <title>Drag to move bend (double-click to remove)</title>
+                  </rect>
+                ))}
+
+                <circle
+                  cx={geom.p1.x}
+                  cy={geom.p1.y}
+                  r={6.5}
+                  fill="#10b981"
+                  stroke="#ffffff"
+                  strokeWidth={2}
+                  className="cursor-grab active:cursor-grabbing"
+                  aria-label="Drag arrow start endpoint"
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    setDragState({ mode: 'edge-end', edgeId: edge.id, end: 'from' });
+                  }}
+                >
+                  <title>Drag to move arrow start (snaps to any shape side or floats freely)</title>
+                </circle>
+
+                <circle
+                  cx={geom.p2.x}
+                  cy={geom.p2.y}
+                  r={6.5}
+                  fill="#4f46e5"
+                  stroke="#ffffff"
+                  strokeWidth={2}
+                  className="cursor-grab active:cursor-grabbing"
+                  aria-label="Drag arrow end endpoint"
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    setDragState({ mode: 'edge-end', edgeId: edge.id, end: 'to' });
+                  }}
+                >
+                  <title>Drag to move arrow end (snaps to any shape side or floats freely)</title>
+                </circle>
+              </g>
+            ))}
+
+        {/* Live arrow drawing preview when dragging in Connect Arrow mode */}
+        {!readOnly && dragState?.mode === 'draw-arrow' && dragState.active && (
+          <line
+            x1={dragState.startPoint.x}
+            y1={dragState.startPoint.y}
+            x2={dragState.currentPoint.x}
+            y2={dragState.currentPoint.y}
+            stroke="#0ea5e9"
+            strokeWidth={2}
+            strokeDasharray="5 4"
+            markerEnd={`url(#arrow-${markerSuffix}-indigo)`}
+          />
+        )}
       </svg>
     </div>
   );
@@ -916,6 +1329,15 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
               >
                 <ArrowRight className="w-3.5 h-3.5 shrink-0" />
                 <span>{connectFromId ? 'Pick Target' : 'Connect Arrow'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={addFreeArrow}
+                aria-label="Add free movable arrow"
+                className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
+              >
+                <MoveUpRight className="w-3.5 h-3.5 shrink-0 text-indigo-600 dark:text-indigo-400" />
+                <span>Free Arrow</span>
               </button>
             </div>
           </div>
@@ -1139,6 +1561,177 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
               </div>
 
               <div className="space-y-1">
+                <span className="block font-medium text-slate-600 dark:text-slate-300">
+                  Route Shape
+                </span>
+                <div className="grid grid-cols-3 gap-1">
+                  {(
+                    [
+                      { id: 'straight', label: 'Straight' },
+                      { id: 'orthogonal', label: 'Side / Elbow' },
+                      { id: 'curved', label: 'Curved' },
+                    ] as Array<{ id: EdgeRouteStyle; label: string }>
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => updateEdge(selectedEdge.id, { routeStyle: opt.id })}
+                      className={`px-1.5 py-1 rounded border text-[11px] font-medium transition-colors ${
+                        (selectedEdge.routeStyle ?? 'straight') === opt.id
+                          ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-200'
+                          : 'border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <span className="block font-medium text-slate-600 dark:text-slate-300">
+                  Quick Side Detour
+                </span>
+                <div className="grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const fromNode = selectedEdge.fromId ? nodeMap.get(selectedEdge.fromId) : undefined;
+                      const toNode = selectedEdge.toId ? nodeMap.get(selectedEdge.toId) : undefined;
+                      const geom = resolveEdgeGeometry(selectedEdge, nodeMap);
+                      const fromLeft = fromNode ? fromNode.x : (geom?.p1.x ?? 80);
+                      const toLeft = toNode ? toNode.x : (geom?.p2.x ?? 80);
+                      const minLeft = Math.min(fromLeft, toLeft);
+                      const midY = geom ? Math.round((geom.p1.y + geom.p2.y) / 2) : 160;
+                      updateEdge(selectedEdge.id, {
+                        fromAnchor: 'left',
+                        toAnchor: 'left',
+                        routeStyle: 'orthogonal',
+                        waypoints: [{ x: Math.round(minLeft - 42), y: midY }],
+                      });
+                    }}
+                    className="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Left Side Loop
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const fromNode = selectedEdge.fromId ? nodeMap.get(selectedEdge.fromId) : undefined;
+                      const toNode = selectedEdge.toId ? nodeMap.get(selectedEdge.toId) : undefined;
+                      const geom = resolveEdgeGeometry(selectedEdge, nodeMap);
+                      const fromRight = fromNode ? fromNode.x + fromNode.width : (geom?.p1.x ?? 240);
+                      const toRight = toNode ? toNode.x + toNode.width : (geom?.p2.x ?? 240);
+                      const maxRight = Math.max(fromRight, toRight);
+                      const midY = geom ? Math.round((geom.p1.y + geom.p2.y) / 2) : 160;
+                      updateEdge(selectedEdge.id, {
+                        fromAnchor: 'right',
+                        toAnchor: 'right',
+                        routeStyle: 'orthogonal',
+                        waypoints: [{ x: Math.round(maxRight + 42), y: midY }],
+                      });
+                    }}
+                    className="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Right Side Loop
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const fromNode = selectedEdge.fromId ? nodeMap.get(selectedEdge.fromId) : undefined;
+                      const toNode = selectedEdge.toId ? nodeMap.get(selectedEdge.toId) : undefined;
+                      const geom = resolveEdgeGeometry(selectedEdge, nodeMap);
+                      const fromTop = fromNode ? fromNode.y : (geom?.p1.y ?? 80);
+                      const toTop = toNode ? toNode.y : (geom?.p2.y ?? 80);
+                      const minTop = Math.min(fromTop, toTop);
+                      const midX = geom ? Math.round((geom.p1.x + geom.p2.x) / 2) : 160;
+                      updateEdge(selectedEdge.id, {
+                        fromAnchor: 'top',
+                        toAnchor: 'top',
+                        routeStyle: 'orthogonal',
+                        waypoints: [{ x: midX, y: Math.round(minTop - 36) }],
+                      });
+                    }}
+                    className="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Top Loop
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateEdge(selectedEdge.id, {
+                        fromAnchor: 'auto',
+                        toAnchor: 'auto',
+                        fromOffset: undefined,
+                        toOffset: undefined,
+                        waypoints: [],
+                      })
+                    }
+                    className="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Reset Bends
+                  </button>
+                </div>
+              </div>
+
+              {(selectedEdge.fromId || selectedEdge.toId) && (
+                <div className="grid grid-cols-2 gap-2">
+                  {selectedEdge.fromId && (
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="inspector-edge-from-side"
+                        className="block font-medium text-slate-600 dark:text-slate-300"
+                      >
+                        Start Side
+                      </label>
+                      <select
+                        id="inspector-edge-from-side"
+                        value={selectedEdge.fromAnchor ?? 'auto'}
+                        onChange={(e) =>
+                          updateEdge(selectedEdge.id, {
+                            fromAnchor: e.target.value as EdgeAnchorSide,
+                          })
+                        }
+                        className="w-full px-1.5 py-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                      >
+                        <option value="auto">Auto</option>
+                        <option value="top">Top</option>
+                        <option value="right">Right</option>
+                        <option value="bottom">Bottom</option>
+                        <option value="left">Left</option>
+                      </select>
+                    </div>
+                  )}
+                  {selectedEdge.toId && (
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="inspector-edge-to-side"
+                        className="block font-medium text-slate-600 dark:text-slate-300"
+                      >
+                        End Side
+                      </label>
+                      <select
+                        id="inspector-edge-to-side"
+                        value={selectedEdge.toAnchor ?? 'auto'}
+                        onChange={(e) =>
+                          updateEdge(selectedEdge.id, {
+                            toAnchor: e.target.value as EdgeAnchorSide,
+                          })
+                        }
+                        className="w-full px-1.5 py-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                      >
+                        <option value="auto">Auto</option>
+                        <option value="top">Top</option>
+                        <option value="right">Right</option>
+                        <option value="bottom">Bottom</option>
+                        <option value="left">Left</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1">
                 <label
                   htmlFor="inspector-edge-style"
                   className="block font-medium text-slate-600 dark:text-slate-300"
@@ -1192,6 +1785,10 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
                   ))}
                 </div>
               </div>
+
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed pt-1">
+                Drag the green/blue ends to snap onto any edge of a shape (or float freely), and drag amber/white handles to route around boxes.
+              </p>
             </>
           ) : (
             <div className="space-y-2.5 text-slate-500 dark:text-slate-400 leading-relaxed">
@@ -1205,7 +1802,7 @@ export const ConceptCanvas: React.FC<ConceptCanvasProps> = ({
               </p>
               <p>
                 Use <strong className="text-slate-700 dark:text-slate-200">Connect Arrow</strong>{' '}
-                then click two shapes to link them.
+                (click two shapes or drag anywhere) or <strong className="text-slate-700 dark:text-slate-200">Free Arrow</strong>, then drag ends or bend handles freely.
               </p>
             </div>
           )}

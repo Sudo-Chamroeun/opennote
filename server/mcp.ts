@@ -89,7 +89,7 @@ export function createMcpRouterHandlers(store: VaultStore) {
     const token = extractBearer(req);
     if (!token) {
       res.status(401).json({
-        error: 'Missing MCP Bearer token. Generate one in Folio Notes -> OpenCode MCP.',
+        error: 'Missing MCP Bearer token. Generate one in opennote -> MCP Connect.',
       });
       return;
     }
@@ -98,14 +98,28 @@ export function createMcpRouterHandlers(store: VaultStore) {
       res.status(403).json({ error: 'Invalid MCP token' });
       return;
     }
+
+    const accept = typeof req.headers.accept === 'string' ? req.headers.accept : '';
+    if (accept.includes('text/event-stream') && !accept.includes('application/json')) {
+      res
+        .status(405)
+        .set('Allow', 'POST')
+        .json({ error: 'Inbound SSE stream not offered; use POST JSON-RPC.' });
+      return;
+    }
+
     res.json({
       name: 'opennote-mcp',
       version: '1.0.0',
-      protocolVersion: '2024-11-05',
-      transport: 'http-jsonrpc',
+      protocolVersion: '2025-03-26',
+      transport: 'streamable-http',
       tools: MCP_TOOLS.map((t) => t.name),
       sharedNotesCount: store.getMcpNotes(record.userId).length,
     });
+  };
+
+  const handleDelete = (_req: Request, res: Response) => {
+    res.status(204).end();
   };
 
   const handlePost = (req: Request, res: Response) => {
@@ -141,18 +155,30 @@ export function createMcpRouterHandlers(store: VaultStore) {
       return;
     }
 
+    if (rpc.method.startsWith('notifications/') || rpc.id === undefined) {
+      res.status(204).end();
+      return;
+    }
+
     const notes = store.getMcpNotes(tokenRecord.userId);
 
     switch (rpc.method) {
       case 'initialize': {
+        const requestedVersion =
+          typeof rpc.params?.protocolVersion === 'string' ? rpc.params.protocolVersion : '';
+        const supportedVersions = ['2025-06-18', '2025-03-26', '2024-11-05'];
+        const negotiatedVersion = supportedVersions.includes(requestedVersion)
+          ? requestedVersion
+          : '2025-03-26';
         res.json({
           jsonrpc: '2.0',
           id,
           result: {
-            protocolVersion: '2024-11-05',
+            protocolVersion: negotiatedVersion,
             capabilities: {
               tools: { listChanged: false },
               resources: { subscribe: false, listChanged: false },
+              prompts: { listChanged: false },
             },
             serverInfo: {
               name: 'opennote-mcp',
@@ -163,13 +189,18 @@ export function createMcpRouterHandlers(store: VaultStore) {
         return;
       }
 
-      case 'notifications/initialized': {
-        res.status(204).end();
+      case 'ping': {
+        res.json({ jsonrpc: '2.0', id, result: {} });
         return;
       }
 
-      case 'ping': {
-        res.json({ jsonrpc: '2.0', id, result: {} });
+      case 'prompts/list': {
+        res.json({ jsonrpc: '2.0', id, result: { prompts: [] } });
+        return;
+      }
+
+      case 'resources/templates/list': {
+        res.json({ jsonrpc: '2.0', id, result: { resourceTemplates: [] } });
         return;
       }
 
@@ -362,5 +393,5 @@ export function createMcpRouterHandlers(store: VaultStore) {
     }
   };
 
-  return { handleGet, handlePost };
+  return { handleGet, handlePost, handleDelete };
 }

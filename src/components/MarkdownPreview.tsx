@@ -245,11 +245,13 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
 
           case 'list': {
             const ListTag = block.ordered ? 'ol' : 'ul';
+            const startNum = block.ordered ? (block.items[0]?.num ?? 1) : undefined;
             return (
               <ListTag
                 key={index}
+                start={startNum}
                 className={`space-y-1.5 ${
-                  block.ordered ? 'list-decimal pl-6' : 'pl-2'
+                  block.ordered ? 'list-decimal pl-7' : 'pl-2'
                 }`}
               >
                 {block.items.map((item, itemIdx) => {
@@ -278,7 +280,8 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
                   return (
                     <li
                       key={itemIdx}
-                      className={block.ordered ? '' : 'list-disc ml-5'}
+                      value={block.ordered && item.num !== undefined ? item.num : undefined}
+                      className={block.ordered ? 'pl-1' : 'list-disc ml-5'}
                     >
                       {renderInline(item.text, onClickWikilink, onClickTag)}
                     </li>

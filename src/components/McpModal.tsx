@@ -1,13 +1,36 @@
-import React, { useEffect, useState } from 'react';
-import { Check, Copy, KeyRound, Pencil, Plug, RefreshCw, Trash2, X } from 'lucide-react';
-import type { AuthSession, McpTokenInfo, NoteItem } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  FileText,
+  Folder,
+  FolderOpen,
+  KeyRound,
+  Pencil,
+  Plug,
+  RefreshCw,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
+import type { AuthSession, FolderItem, McpTokenInfo, NoteItem } from '../types';
+import {
+  FOLDER_COLORS,
+  buildFolderTree,
+  getFolderMcpStats,
+  type FolderTreeNode,
+} from '../utils/vault';
 
 interface McpModalProps {
   isOpen: boolean;
   onClose: () => void;
   session: AuthSession | null;
+  folders: FolderItem[];
   notes: NoteItem[];
   onToggleNoteMcp: (noteId: string) => void;
+  onBatchSetNotesMcp: (noteIds: string[], expose: boolean) => void;
   onSyncMcpBridge: () => Promise<number>;
 }
 
@@ -16,6 +39,7 @@ type McpClientId =
   | 'opencode'
   | 'lmstudio'
   | 'claude'
+  | 'claude-desktop'
   | 'cursor'
   | 'codex'
   | 'hermes'
@@ -118,6 +142,31 @@ const MCP_PRESETS: McpPreset[] = [
       )}`,
   },
   {
+    id: 'claude-desktop',
+    name: 'Claude Desktop',
+    configPath: 'claude_desktop_config.json',
+    note: 'Claude Desktop requires a stdio bridge in claude_desktop_config.json (macOS: ~/Library/Application Support/Claude/ · Windows: %APPDATA%\\Claude\\), or paste the Connector URL below in Settings -> Connectors.',
+    buildConfig: (origin, token) =>
+      JSON.stringify(
+        {
+          mcpServers: {
+            opennote: {
+              command: 'npx',
+              args: [
+                '-y',
+                'mcp-remote',
+                `${origin}/api/mcp`,
+                '--header',
+                `Authorization: Bearer ${token}`,
+              ],
+            },
+          },
+        },
+        null,
+        2,
+      ),
+  },
+  {
     id: 'cursor',
     name: 'Cursor',
     configPath: '.cursor/mcp.json',
@@ -183,8 +232,10 @@ export const McpModal: React.FC<McpModalProps> = ({
   isOpen,
   onClose,
   session,
+  folders,
   notes,
   onToggleNoteMcp,
+  onBatchSetNotesMcp,
   onSyncMcpBridge,
 }) => {
   const [tokens, setTokens] = useState<McpTokenInfo[]>([]);
@@ -197,11 +248,17 @@ export const McpModal: React.FC<McpModalProps> = ({
   const [syncingBridge, setSyncingBridge] = useState(false);
   const [renamingTokenId, setRenamingTokenId] = useState<string | null>(null);
   const [renameTokenValue, setRenameTokenValue] = useState('');
+  const [filterQuery, setFilterQuery] = useState('');
+  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Record<string, boolean>>({});
 
   const origin =
     typeof window !== 'undefined' ? window.location.origin : 'https://notes.yourdomain.com';
-  const activeNotes = notes.filter((n) => !n.deleted);
+  const activeNotes = useMemo(() => notes.filter((n) => !n.deleted), [notes]);
   const sharedCount = activeNotes.filter((n) => n.exposeToMcp).length;
+  const folderTree = useMemo(
+    () => buildFolderTree(folders, activeNotes),
+    [folders, activeNotes],
+  );
 
   useEffect(() => {
     if (!isOpen || !session) return;
@@ -323,6 +380,132 @@ export const McpModal: React.FC<McpModalProps> = ({
     setTimeout(() => setCopied(null), 1600);
   };
 
+  const normalizedFilter = filterQuery.trim().toLowerCase();
+
+  const matchesTreeNode = (node: FolderTreeNode): boolean => {
+    if (!normalizedFilter) return true;
+    if (node.folder.name.toLowerCase().includes(normalizedFilter)) return true;
+    if (node.notes.some((n) => (n.title || 'Untitled Note').toLowerCase().includes(normalizedFilter))) {
+      return true;
+    }
+    return node.children.some(matchesTreeNode);
+  };
+
+  const toggleFolderCollapsed = (id: string) => {
+    setCollapsedFolderIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const renderFolderBranch = (node: FolderTreeNode, depth = 0): React.ReactNode => {
+    if (!matchesTreeNode(node)) return null;
+    const stats = getFolderMcpStats(node);
+    const isCollapsed = normalizedFilter ? false : Boolean(collapsedFolderIds[node.folder.id]);
+    const colorMeta = FOLDER_COLORS[node.folder.color ?? 'indigo'] ?? FOLDER_COLORS.indigo;
+    const folderMatches =
+      !normalizedFilter || node.folder.name.toLowerCase().includes(normalizedFilter);
+    const visibleNotes = folderMatches
+      ? node.notes
+      : node.notes.filter((n) =>
+          (n.title || 'Untitled Note').toLowerCase().includes(normalizedFilter),
+        );
+
+    const folderIndentClass = ['pl-2.5', 'pl-6', 'pl-10', 'pl-14'][Math.min(depth, 3)];
+    const noteIndentClass = ['pl-8', 'pl-12', 'pl-16', 'pl-20'][Math.min(depth, 3)];
+
+    return (
+      <div key={node.folder.id}>
+        <div
+          className={`flex items-center justify-between gap-2 pr-3 py-2 bg-slate-50/80 dark:bg-slate-800/35 hover:bg-slate-100/80 dark:hover:bg-slate-800/60 ${folderIndentClass}`}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <button
+              type="button"
+              onClick={() => toggleFolderCollapsed(node.folder.id)}
+              aria-label={`Toggle folder ${node.folder.name}`}
+              aria-expanded={!isCollapsed}
+              className="p-0.5 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+            >
+              {isCollapsed ? (
+                <ChevronRight className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+            {isCollapsed ? (
+              <Folder className={`w-4 h-4 shrink-0 ${colorMeta.iconClass}`} />
+            ) : (
+              <FolderOpen className={`w-4 h-4 shrink-0 ${colorMeta.iconClass}`} />
+            )}
+            <button
+              type="button"
+              onClick={() => toggleFolderCollapsed(node.folder.id)}
+              className="text-xs font-semibold text-slate-800 dark:text-slate-100 truncate text-left"
+            >
+              {node.folder.name}
+            </button>
+            <span className="text-[11px] text-slate-400 dark:text-slate-500 tabular-nums shrink-0">
+              {stats.total === 0 ? 'Empty' : `${stats.shared}/${stats.total} included`}
+            </span>
+          </div>
+          <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer shrink-0">
+            <span>{stats.state === 'all' ? 'All Shared' : 'Entire Folder'}</span>
+            <input
+              type="checkbox"
+              disabled={stats.total === 0}
+              checked={stats.state === 'all' && stats.total > 0}
+              ref={(el) => {
+                if (el) el.indeterminate = stats.state === 'some';
+              }}
+              onChange={() =>
+                onBatchSetNotesMcp(stats.noteIds, stats.state !== 'all')
+              }
+              aria-label={`Share entire folder ${node.folder.name} with MCP`}
+              className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 disabled:opacity-40"
+            />
+          </label>
+        </div>
+
+        {!isCollapsed && (
+          <div className="divide-y divide-slate-100 dark:divide-slate-800/70">
+            {visibleNotes.map((n) => (
+              <label
+                key={n.id}
+                className={`flex items-center justify-between gap-3 pr-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/30 ${noteIndentClass}`}
+              >
+                <span className="inline-flex items-center gap-2 min-w-0 text-slate-700 dark:text-slate-200">
+                  <FileText className="w-3.5 h-3.5 shrink-0 text-slate-400" />
+                  <span className="truncate">{n.title || 'Untitled Note'}</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(n.exposeToMcp)}
+                  onChange={() => onToggleNoteMcp(n.id)}
+                  aria-label={`Include note ${n.title || 'Untitled Note'} in MCP`}
+                  className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 shrink-0"
+                />
+              </label>
+            ))}
+            {node.children.map((child) => renderFolderBranch(child, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const visibleRootNotes = folderTree.rootNotes.filter(
+    (n) =>
+      !normalizedFilter ||
+      (n.title || 'Untitled Note').toLowerCase().includes(normalizedFilter),
+  );
+  const rootNoteIds = folderTree.rootNotes.map((n) => n.id);
+  const rootSharedCount = folderTree.rootNotes.filter((n) => Boolean(n.exposeToMcp)).length;
+  const rootState: 'all' | 'some' | 'none' =
+    folderTree.rootNotes.length === 0 || rootSharedCount === 0
+      ? 'none'
+      : rootSharedCount === folderTree.rootNotes.length
+        ? 'all'
+        : 'some';
+  const isRootCollapsed = normalizedFilter ? false : Boolean(collapsedFolderIds.__root__);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/65">
       <div
@@ -357,6 +540,7 @@ export const McpModal: React.FC<McpModalProps> = ({
             </div>
           ) : (
             <>
+              {/* 1. Token management (requires signed-in session) */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-semibold text-slate-700 dark:text-slate-200">
@@ -492,13 +676,38 @@ export const McpModal: React.FC<McpModalProps> = ({
                   </div>
                 )}
               </div>
+            </>
+          )}
 
-              {/* Note access toggle */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-                    2. Choose Notes Exposed to Agents
-                  </h3>
+          {/* 2. Folder & Per-File Access Toggle (always visible so users can select folders & exclude files) */}
+          <div className="space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  {session ? '2. Choose Folders & Notes Exposed to Agents' : 'Choose Folders & Notes Exposed to Agents'}
+                </h3>
+                {!session && (
+                  <span className="text-[11px] text-slate-400 dark:text-slate-500 tabular-nums">
+                    {sharedCount} / {activeNotes.length} selected
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onBatchSetNotesMcp(activeNotes.map((n) => n.id), true)}
+                  className="px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  Select All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onBatchSetNotesMcp(activeNotes.map((n) => n.id), false)}
+                  className="px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  Clear All
+                </button>
+                {session && (
                   <button
                     type="button"
                     onClick={handleSyncBridge}
@@ -508,32 +717,107 @@ export const McpModal: React.FC<McpModalProps> = ({
                     <RefreshCw className={`w-3.5 h-3.5 ${syncingBridge ? 'animate-spin' : ''}`} />
                     Sync MCP Bridge
                   </button>
-                </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Only checked notes are synced to your token-protected MCP index; other notes stay
-                  strictly zero-knowledge encrypted on the server.
-                </p>
-                <div className="max-h-36 overflow-y-auto divide-y divide-slate-200 dark:divide-slate-800 rounded-lg border border-slate-200 dark:border-slate-800">
-                  {activeNotes.map((n) => (
-                    <label
-                      key={n.id}
-                      className="flex items-center justify-between px-3 py-2 text-xs cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40"
-                    >
-                      <span className="text-slate-800 dark:text-slate-200 truncate pr-4">
-                        {n.title || 'Untitled Note'}
+                )}
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Select an entire folder to share all files inside it, then uncheck any individual
+              files you want to exclude from the AI agent. Unchecked notes stay zero-knowledge
+              encrypted.
+            </p>
+
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="search"
+                aria-label="Filter MCP folders and notes"
+                value={filterQuery}
+                onChange={(e) => setFilterQuery(e.target.value)}
+                placeholder="Filter folders or notes..."
+                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+              />
+            </div>
+
+            <div className="max-h-56 overflow-y-auto divide-y divide-slate-200 dark:divide-slate-800 rounded-lg border border-slate-200 dark:border-slate-800">
+              {folderTree.roots.map((rootNode) => renderFolderBranch(rootNode, 0))}
+
+              {visibleRootNotes.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between gap-2 px-2.5 py-2 bg-slate-50/80 dark:bg-slate-800/35 hover:bg-slate-100/80 dark:hover:bg-slate-800/60">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => toggleFolderCollapsed('__root__')}
+                        aria-label="Toggle folder Root Notes"
+                        aria-expanded={!isRootCollapsed}
+                        className="p-0.5 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                      >
+                        {isRootCollapsed ? (
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                      <Folder className="w-4 h-4 shrink-0 text-slate-400" />
+                      <button
+                        type="button"
+                        onClick={() => toggleFolderCollapsed('__root__')}
+                        className="text-xs font-semibold text-slate-700 dark:text-slate-200 truncate"
+                      >
+                        Root (Unfiled)
+                      </button>
+                      <span className="text-[11px] text-slate-400 dark:text-slate-500 tabular-nums shrink-0">
+                        {rootSharedCount}/{folderTree.rootNotes.length} included
                       </span>
+                    </div>
+                    <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer shrink-0">
+                      <span>{rootState === 'all' ? 'All Shared' : 'Entire Folder'}</span>
                       <input
                         type="checkbox"
-                        checked={Boolean(n.exposeToMcp)}
-                        onChange={() => onToggleNoteMcp(n.id)}
+                        checked={rootState === 'all'}
+                        ref={(el) => {
+                          if (el) el.indeterminate = rootState === 'some';
+                        }}
+                        onChange={() => onBatchSetNotesMcp(rootNoteIds, rootState !== 'all')}
+                        aria-label="Share all unfiled root notes with MCP"
                         className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                       />
                     </label>
-                  ))}
+                  </div>
+
+                  {!isRootCollapsed && (
+                    <div className="divide-y divide-slate-100 dark:divide-slate-800/70">
+                      {visibleRootNotes.map((n) => (
+                        <label
+                          key={n.id}
+                          className="flex items-center justify-between gap-3 pl-8 pr-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/30"
+                        >
+                          <span className="inline-flex items-center gap-2 min-w-0 text-slate-700 dark:text-slate-200">
+                            <FileText className="w-3.5 h-3.5 shrink-0 text-slate-400" />
+                            <span className="truncate">{n.title || 'Untitled Note'}</span>
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(n.exposeToMcp)}
+                            onChange={() => onToggleNoteMcp(n.id)}
+                            aria-label={`Include note ${n.title || 'Untitled Note'} in MCP`}
+                            className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 shrink-0"
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            </>
-          )}
+              )}
+
+              {activeNotes.length === 0 && folders.filter((f) => !f.deleted).length === 0 && (
+                <div className="px-3 py-4 text-xs text-center text-slate-400">
+                  No notes or folders yet.
+                </div>
+              )}
+            </div>
+          </div>
 
           {/* Multi-Agent MCP Presets */}
           <div className="space-y-3">
@@ -604,6 +888,33 @@ export const McpModal: React.FC<McpModalProps> = ({
             <pre className="p-3 rounded-lg bg-slate-950 text-slate-100 text-xs font-mono overflow-x-auto border border-slate-800">
               <code>{generatedConfig}</code>
             </pre>
+
+            {selectedClient === 'claude-desktop' && (
+              <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 space-y-1.5 text-xs">
+                <div className="font-medium text-slate-700 dark:text-slate-200">
+                  Option B — Claude Desktop Settings -&gt; Connectors (Add custom connector URL, no Node.js needed):
+                </div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 px-2 py-1 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 font-mono text-[11px] text-slate-700 dark:text-slate-200 overflow-x-auto">
+                    {`${origin}/api/mcp?token=${tokenDisplay}`}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      copyText(`${origin}/api/mcp?token=${tokenDisplay}`, 'desktop-url')
+                    }
+                    className="px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium inline-flex items-center gap-1 whitespace-nowrap hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    {copied === 'desktop-url' ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    {copied === 'desktop-url' ? 'Copied' : 'Copy URL'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {testResult && (
               <div className="px-3 py-2 rounded-lg border border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-950/40 text-xs text-indigo-800 dark:text-indigo-200">

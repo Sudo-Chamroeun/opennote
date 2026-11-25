@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {
   FOLDER_COLORS,
   buildFolderTree,
+  collectFolderTreeNoteIds,
   collectVaultTags,
   filterNotes,
   getFolderBreadcrumbs,
+  getFolderMcpStats,
   isDescendantFolder,
   mergeVersionedItems,
 } from './vault';
@@ -28,6 +30,7 @@ const notes: NoteItem[] = [
     createdAt: now,
     updatedAt: now + 10,
     version: 1,
+    exposeToMcp: true,
   },
   {
     id: 'n2',
@@ -38,6 +41,17 @@ const notes: NoteItem[] = [
     createdAt: now,
     updatedAt: now + 20,
     version: 1,
+  },
+  {
+    id: 'n3',
+    title: 'Backend Overview',
+    content: 'Architecture overview',
+    folderId: 'f1',
+    tags: [],
+    createdAt: now,
+    updatedAt: now + 5,
+    version: 1,
+    exposeToMcp: false,
   },
 ];
 
@@ -85,3 +99,23 @@ test('mergeVersionedItems prefers higher version and newer timestamp', () => {
   const merged = mergeVersionedItems(local, remote);
   assert.equal(merged[0].title, 'Newer Version');
 });
+
+test('collectFolderTreeNoteIds and getFolderMcpStats compute subtree inclusion states', () => {
+  const tree = buildFolderTree(folders, notes);
+  const backendNode = tree.roots[0];
+  const authNode = backendNode.children[0];
+
+  const ids = collectFolderTreeNoteIds(backendNode);
+  assert.deepEqual(ids.sort(), ['n1', 'n3']);
+
+  const backendStats = getFolderMcpStats(backendNode);
+  assert.equal(backendStats.total, 2);
+  assert.equal(backendStats.shared, 1);
+  assert.equal(backendStats.state, 'some');
+
+  const authStats = getFolderMcpStats(authNode);
+  assert.equal(authStats.total, 1);
+  assert.equal(authStats.shared, 1);
+  assert.equal(authStats.state, 'all');
+});
+

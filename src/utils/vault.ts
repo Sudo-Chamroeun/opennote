@@ -245,3 +245,30 @@ export function collectShareSnapshot(
     notes: sharedNotes,
   };
 }
+
+export function collectFolderTreeNoteIds(node: FolderTreeNode): string[] {
+  const ids: string[] = node.notes.map((n) => n.id);
+  for (const child of node.children) {
+    ids.push(...collectFolderTreeNoteIds(child));
+  }
+  return ids;
+}
+
+export function getFolderMcpStats(node: FolderTreeNode): {
+  noteIds: string[];
+  total: number;
+  shared: number;
+  state: 'all' | 'some' | 'none';
+} {
+  const collectNotes = (cur: FolderTreeNode): NoteItem[] => [
+    ...cur.notes,
+    ...cur.children.flatMap(collectNotes),
+  ];
+  const all = collectNotes(node);
+  const noteIds = all.map((n) => n.id);
+  const shared = all.filter((n) => Boolean(n.exposeToMcp)).length;
+  const state: 'all' | 'some' | 'none' =
+    all.length === 0 || shared === 0 ? 'none' : shared === all.length ? 'all' : 'some';
+  return { noteIds, total: all.length, shared, state };
+}
+

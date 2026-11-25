@@ -1,4 +1,11 @@
-import type { ConceptDiagram, DiagramEdge, DiagramNode, ShapeColor, ShapeKind } from '../types';
+import type {
+  ConceptDiagram,
+  DiagramEdge,
+  DiagramNode,
+  EdgeAnchorSide,
+  ShapeColor,
+  ShapeKind,
+} from '../types';
 
 export interface Point {
   x: number;
@@ -117,16 +124,22 @@ export function createDefaultNode(kind: ShapeKind, x: number, y: number, index =
   };
 }
 
-export function createEdge(fromId: string, toId: string, label = ''): DiagramEdge {
+export function createEdge(
+  fromId?: string,
+  toId?: string,
+  label = '',
+  extras?: Partial<DiagramEdge>,
+): DiagramEdge {
   return {
     id: `edge_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-    fromId,
-    toId,
+    ...(fromId ? { fromId } : {}),
+    ...(toId ? { toId } : {}),
     label,
     style: 'solid',
     arrowEnd: true,
     arrowStart: false,
     color: 'slate',
+    ...extras,
   };
 }
 
@@ -294,6 +307,425 @@ export function getAnchorPoint(node: DiagramNode, target: Point): Point {
   return {
     x: cx + dx * t,
     y: cy + dy * t,
+  };
+}
+
+function clamp(val: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, val));
+}
+
+export function getSideAnchorPoint(
+  node: DiagramNode,
+  side: Exclude<EdgeAnchorSide, 'auto'>,
+  offset = 0.5,
+): Point {
+  const t = clamp(offset, 0.04, 0.96);
+  const cx = node.x + node.width / 2;
+  const cy = node.y + node.height / 2;
+  const hw = node.width / 2;
+  const hh = node.height / 2;
+
+  if (node.kind === 'circle') {
+    if (side === 'top' || side === 'bottom') {
+      const x = node.x + node.width * t;
+      const nx = clamp((x - cx) / Math.max(1, hw), -0.98, 0.98);
+      const dy = hh * Math.sqrt(Math.max(0, 1 - nx * nx));
+      return { x, y: side === 'top' ? cy - dy : cy + dy };
+    }
+    const y = node.y + node.height * t;
+    const ny = clamp((y - cy) / Math.max(1, hh), -0.98, 0.98);
+    const dx = hw * Math.sqrt(Math.max(0, 1 - ny * ny));
+    return { x: side === 'left' ? cx - dx : cx + dx, y };
+  }
+
+  if (node.kind === 'diamond') {
+    // Anchor around diamond perimeter along requested side
+    const u = t - 0.5; // -0.46..0.46
+    const factor = 1 - Math.abs(u) * 2;
+    switch (side) {
+      case 'top':
+        return { x: cx + u * node.width, y: cy - hh * factor };
+      case 'bottom':
+        return { x: cx + u * node.width, y: cy + hh * factor };
+      case 'left':
+        return { x: cx - hw * factor, y: cy + u * node.height };
+      case 'right':
+        return { x: cx + hw * factor, y: cy + u * node.height };
+    }
+  }
+
+  switch (side) {
+    case 'top':
+      return { x: node.x + node.width * t, y: node.y };
+    case 'bottom':
+      return { x: node.x + node.width * t, y: node.y + node.height };
+    case 'left':
+      return { x: node.x, y: node.y + node.height * t };
+    case 'right':
+      return { x: node.x + node.width, y: node.y + node.height * t };
+  }
+}
+
+export interface NodeAnchorHit {
+  nodeId: string;
+  side: Exclude<EdgeAnchorSide, 'auto'>;
+  offset: number;
+  point: Point;
+  dist: number;
+}
+
+export function findNearestNodeAnchor(
+  nodes: DiagramNode[],
+  point: Point,
+  snapRadius = 24,
+  excludeNodeId?: string,
+): NodeAnchorHit | null {
+  let best: NodeAnchorHit | null = null;
+
+  for (const node of nodes) {
+    if (excludeNodeId && node.id === excludeNodeId) continue;
+    const insideOrNear =
+      point.x >= node.x - snapRadius &&
+      point.x <= node.x + node.width + snapRadius &&
+      point.y >= node.y - snapRadius &&
+      point.y <= node.y + node.height + snapRadius;
+
+    if (!insideOrNear) continue;
+
+    const candidates: Array<{ side: Exclude<EdgeAnchorSide, 'auto'>; offset: number }> = [
+      { side: 'top', offset: clamp((point.x - node.x) / Math.max(1, node.width), 0.06, 0.94) },
+      { side: 'bottom', offset: clamp((point.x - node.x) / Math.max(1, node.width), 0.06, 0.94) },
+      { side: 'left', offset: clamp((point.y - node.y) / Math.max(1, node.height), 0.06, 0.94) },
+      { side: 'right', offset: clamp((point.y - node.y) / Math.max(1, node.height), 0.06, 0.94) },
+    ];
+
+    for (const c of candidates) {
+      const anchorPt = getSideAnchorPoint(node, c.side, c.offset);
+      const dist = Math.hypot(point.x - anchorPt.x, point.y - anchorPt.y);
+      if (!best || dist < best.dist) {
+        best = {
+          nodeId: node.id,
+          side: c.side,
+          offset: Number(c.offset.toFixed(3)),
+          point: anchorPt,
+          dist,
+        };
+      }
+    }
+  }
+
+  return best;
+}
+
+function inferDominantSide(from: Point, to: Point): Exclude<EdgeAnchorSide, 'auto'> {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx >= 0 ? 'right' : 'left';
+  }
+  return dy >= 0 ? 'bottom' : 'top';
+}
+
+function dedupeSequentialPoints(pts: Point[]): Point[] {
+  const out: Point[] = [];
+  for (const pt of pts) {
+    const prev = out[out.length - 1];
+    if (!prev || Math.hypot(pt.x - prev.x, pt.y - prev.y) > 0.5) {
+      out.push(pt);
+    }
+  }
+  return out;
+}
+
+export function buildAutoOrthogonalPoints(
+  p1: Point,
+  p2: Point,
+  fromSide: Exclude<EdgeAnchorSide, 'auto'>,
+  toSide: Exclude<EdgeAnchorSide, 'auto'>,
+): Point[] {
+  if (fromSide === 'left' && toSide === 'left') {
+    const laneX = Math.min(p1.x, p2.x) - 36;
+    return dedupeSequentialPoints([p1, { x: laneX, y: p1.y }, { x: laneX, y: p2.y }, p2]);
+  }
+  if (fromSide === 'right' && toSide === 'right') {
+    const laneX = Math.max(p1.x, p2.x) + 36;
+    return dedupeSequentialPoints([p1, { x: laneX, y: p1.y }, { x: laneX, y: p2.y }, p2]);
+  }
+  if (fromSide === 'top' && toSide === 'top') {
+    const laneY = Math.min(p1.y, p2.y) - 32;
+    return dedupeSequentialPoints([p1, { x: p1.x, y: laneY }, { x: p2.x, y: laneY }, p2]);
+  }
+  if (fromSide === 'bottom' && toSide === 'bottom') {
+    const laneY = Math.max(p1.y, p2.y) + 32;
+    return dedupeSequentialPoints([p1, { x: p1.x, y: laneY }, { x: p2.x, y: laneY }, p2]);
+  }
+
+  const fromHoriz = fromSide === 'left' || fromSide === 'right';
+  const toHoriz = toSide === 'left' || toSide === 'right';
+
+  if (fromHoriz && toHoriz) {
+    const midX = (p1.x + p2.x) / 2;
+    return dedupeSequentialPoints([p1, { x: midX, y: p1.y }, { x: midX, y: p2.y }, p2]);
+  }
+  if (!fromHoriz && !toHoriz) {
+    const midY = (p1.y + p2.y) / 2;
+    return dedupeSequentialPoints([p1, { x: p1.x, y: midY }, { x: p2.x, y: midY }, p2]);
+  }
+  if (fromHoriz && !toHoriz) {
+    return dedupeSequentialPoints([p1, { x: p2.x, y: p1.y }, p2]);
+  }
+  return dedupeSequentialPoints([p1, { x: p1.x, y: p2.y }, p2]);
+}
+
+function getSideNormal(side: Exclude<EdgeAnchorSide, 'auto'>): Point {
+  switch (side) {
+    case 'top':
+      return { x: 0, y: -1 };
+    case 'bottom':
+      return { x: 0, y: 1 };
+    case 'left':
+      return { x: -1, y: 0 };
+    case 'right':
+      return { x: 1, y: 0 };
+  }
+}
+
+function computePolylineMidpoint(pts: Point[]): Point {
+  if (pts.length === 0) return { x: 0, y: 0 };
+  if (pts.length === 1) return pts[0];
+  let total = 0;
+  const segLens: number[] = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+    segLens.push(len);
+    total += len;
+  }
+  if (total < 0.001) return pts[0];
+  const half = total / 2;
+  let acc = 0;
+  for (let i = 0; i < segLens.length; i++) {
+    if (acc + segLens[i] >= half) {
+      const ratio = segLens[i] > 0 ? (half - acc) / segLens[i] : 0;
+      return {
+        x: pts[i].x + (pts[i + 1].x - pts[i].x) * ratio,
+        y: pts[i].y + (pts[i + 1].y - pts[i].y) * ratio,
+      };
+    }
+    acc += segLens[i];
+  }
+  return pts[pts.length - 1];
+}
+
+export interface ResolvedEdgeGeometry {
+  p1: Point;
+  p2: Point;
+  fromSide: Exclude<EdgeAnchorSide, 'auto'>;
+  toSide: Exclude<EdgeAnchorSide, 'auto'>;
+  polylinePoints: Point[];
+  controlPoints: Point[];
+  svgPath: string;
+  labelPoint: Point;
+  segmentMidpoints: Array<{ index: number; point: Point }>;
+}
+
+export function resolveEdgeGeometry(
+  edge: DiagramEdge,
+  nodeMap: Map<string, DiagramNode>,
+): ResolvedEdgeGeometry | null {
+  const fromNode = edge.fromId ? nodeMap.get(edge.fromId) : undefined;
+  const toNode = edge.toId ? nodeMap.get(edge.toId) : undefined;
+  const waypoints = edge.waypoints ?? [];
+
+  if (edge.fromId && !fromNode && !edge.fromPoint) return null;
+  if (edge.toId && !toNode && !edge.toPoint) return null;
+
+  const fallbackFrom = edge.fromPoint ?? (fromNode ? getNodeCenter(fromNode) : { x: 80, y: 80 });
+  const fallbackTo = edge.toPoint ?? (toNode ? getNodeCenter(toNode) : { x: 240, y: 80 });
+
+  const targetForFrom = waypoints[0] ?? fallbackTo;
+  const targetForTo = waypoints[waypoints.length - 1] ?? fallbackFrom;
+
+  const p1 =
+    fromNode && edge.fromAnchor && edge.fromAnchor !== 'auto'
+      ? getSideAnchorPoint(fromNode, edge.fromAnchor, edge.fromOffset ?? 0.5)
+      : fromNode
+        ? getAnchorPoint(fromNode, targetForFrom)
+        : fallbackFrom;
+
+  const p2 =
+    toNode && edge.toAnchor && edge.toAnchor !== 'auto'
+      ? getSideAnchorPoint(toNode, edge.toAnchor, edge.toOffset ?? 0.5)
+      : toNode
+        ? getAnchorPoint(toNode, targetForTo)
+        : fallbackTo;
+
+  const fromSide: Exclude<EdgeAnchorSide, 'auto'> =
+    edge.fromAnchor && edge.fromAnchor !== 'auto'
+      ? edge.fromAnchor
+      : inferDominantSide(p1, targetForFrom);
+  const toSide: Exclude<EdgeAnchorSide, 'auto'> =
+    edge.toAnchor && edge.toAnchor !== 'auto'
+      ? edge.toAnchor
+      : inferDominantSide(p2, targetForTo);
+
+  const routeStyle = edge.routeStyle ?? 'straight';
+
+  if (routeStyle === 'curved') {
+    if (waypoints.length === 0) {
+      const dist = Math.max(36, Math.hypot(p2.x - p1.x, p2.y - p1.y) * 0.42);
+      const n1 = getSideNormal(fromSide);
+      const n2 = getSideNormal(toSide);
+      const c1 = { x: p1.x + n1.x * dist, y: p1.y + n1.y * dist };
+      const c2 = { x: p2.x + n2.x * dist, y: p2.y + n2.y * dist };
+      const svgPath = `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
+      const labelPoint = {
+        x: 0.125 * p1.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * p2.x,
+        y: 0.125 * p1.y + 0.375 * c1.y + 0.375 * c2.y + 0.125 * p2.y,
+      };
+      return {
+        p1,
+        p2,
+        fromSide,
+        toSide,
+        polylinePoints: [p1, c1, c2, p2],
+        controlPoints: [],
+        svgPath,
+        labelPoint,
+        segmentMidpoints: [{ index: 0, point: labelPoint }],
+      };
+    }
+
+    if (waypoints.length === 1) {
+      const w = waypoints[0];
+      const cx = 2 * w.x - 0.5 * (p1.x + p2.x);
+      const cy = 2 * w.y - 0.5 * (p1.y + p2.y);
+      const svgPath = `M ${p1.x} ${p1.y} Q ${cx} ${cy}, ${p2.x} ${p2.y}`;
+      const segMids = [
+        {
+          index: 0,
+          point: {
+            x: 0.25 * p1.x + 0.5 * cx + 0.25 * w.x,
+            y: 0.25 * p1.y + 0.5 * cy + 0.25 * w.y,
+          },
+        },
+        {
+          index: 1,
+          point: {
+            x: 0.25 * w.x + 0.5 * cx + 0.25 * p2.x,
+            y: 0.25 * w.y + 0.5 * cy + 0.25 * p2.y,
+          },
+        },
+      ];
+      return {
+        p1,
+        p2,
+        fromSide,
+        toSide,
+        polylinePoints: [p1, w, p2],
+        controlPoints: [w],
+        svgPath,
+        labelPoint: w,
+        segmentMidpoints: segMids,
+      };
+    }
+
+    const pts = [p1, ...waypoints, p2];
+    let d = `M ${pts[0].x} ${pts[0].y}`;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2;
+      const my = (pts[i].y + pts[i + 1].y) / 2;
+      d += ` Q ${pts[i].x} ${pts[i].y}, ${mx} ${my}`;
+    }
+    const last = pts[pts.length - 1];
+    const prev = pts[pts.length - 2];
+    d += ` Q ${prev.x} ${prev.y}, ${last.x} ${last.y}`;
+    const segMids = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      segMids.push({
+        index: i,
+        point: { x: (pts[i].x + pts[i + 1].x) / 2, y: (pts[i].y + pts[i + 1].y) / 2 },
+      });
+    }
+    return {
+      p1,
+      p2,
+      fromSide,
+      toSide,
+      polylinePoints: pts,
+      controlPoints: waypoints,
+      svgPath: d,
+      labelPoint: computePolylineMidpoint(pts),
+      segmentMidpoints: segMids,
+    };
+  }
+
+  let polylinePoints: Point[];
+  let controlPoints: Point[] = waypoints;
+
+  if (routeStyle === 'orthogonal') {
+    if (waypoints.length === 0) {
+      polylinePoints = buildAutoOrthogonalPoints(p1, p2, fromSide, toSide);
+    } else if (waypoints.length === 1) {
+      const w = waypoints[0];
+      const fromHoriz = fromSide === 'left' || fromSide === 'right';
+      const toHoriz = toSide === 'left' || toSide === 'right';
+      if (fromHoriz && toHoriz) {
+        polylinePoints = dedupeSequentialPoints([p1, { x: w.x, y: p1.y }, { x: w.x, y: p2.y }, p2]);
+        controlPoints = [{ x: w.x, y: (p1.y + p2.y) / 2 }];
+      } else if (!fromHoriz && !toHoriz) {
+        polylinePoints = dedupeSequentialPoints([p1, { x: p1.x, y: w.y }, { x: p2.x, y: w.y }, p2]);
+        controlPoints = [{ x: (p1.x + p2.x) / 2, y: w.y }];
+      } else if (fromHoriz) {
+        polylinePoints = dedupeSequentialPoints([p1, { x: w.x, y: p1.y }, w, { x: p2.x, y: w.y }, p2]);
+      } else {
+        polylinePoints = dedupeSequentialPoints([p1, { x: p1.x, y: w.y }, w, { x: w.x, y: p2.y }, p2]);
+      }
+    } else {
+      polylinePoints = dedupeSequentialPoints([p1, ...waypoints, p2]);
+    }
+  } else {
+    polylinePoints = dedupeSequentialPoints([p1, ...waypoints, p2]);
+  }
+
+  const svgPath = polylinePoints
+    .map((pt, idx) => `${idx === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`)
+    .join(' ');
+  const labelPoint = computePolylineMidpoint(polylinePoints);
+
+  const segmentMidpoints: Array<{ index: number; point: Point }> = [];
+  if (waypoints.length === 0 && routeStyle === 'orthogonal') {
+    // Allow dragging the middle lane directly as a single bend handle
+    segmentMidpoints.push({ index: 0, point: labelPoint });
+  } else if (routeStyle === 'orthogonal' && waypoints.length === 1) {
+    // Single lane handle already exists in controlPoints; allow adding extra bends on outer stubs if needed
+    const secondPt = polylinePoints[1] ?? p2;
+    segmentMidpoints.push({
+      index: 0,
+      point: { x: (p1.x + secondPt.x) / 2, y: (p1.y + secondPt.y) / 2 },
+    });
+  } else {
+    const rawPts = [p1, ...waypoints, p2];
+    for (let i = 0; i < rawPts.length - 1; i++) {
+      segmentMidpoints.push({
+        index: i,
+        point: {
+          x: (rawPts[i].x + rawPts[i + 1].x) / 2,
+          y: (rawPts[i].y + rawPts[i + 1].y) / 2,
+        },
+      });
+    }
+  }
+
+  return {
+    p1,
+    p2,
+    fromSide,
+    toSide,
+    polylinePoints,
+    controlPoints,
+    svgPath,
+    labelPoint,
+    segmentMidpoints,
   };
 }
 

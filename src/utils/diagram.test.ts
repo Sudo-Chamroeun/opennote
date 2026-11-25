@@ -6,16 +6,19 @@ import {
   createEdge,
   extractConceptBlocksFromMarkdown,
   findConceptDiagramAtCursor,
+  findNearestNodeAnchor,
   getAnchorPoint,
   getShapePath,
   getShapeTextBounds,
+  getSideAnchorPoint,
   mapGlobalOffsetToSegment,
   removeConceptBlockFromMarkdown,
+  resolveEdgeGeometry,
   splitMarkdownIntoEditorSegments,
   upsertConceptBlockInMarkdown,
   type EditorTextSegment,
 } from './diagram';
-import type { ConceptDiagram } from '../types';
+import type { ConceptDiagram, DiagramNode } from '../types';
 
 test('shape paths generate valid SVG commands for hexagon and puzzle', () => {
   const hex = getShapePath('hexagon', 150, 80);
@@ -126,3 +129,108 @@ test('splitMarkdownIntoEditorSegments collapses concept blocks cleanly and prese
   assert.ok(inserted.indexOf('First line.') < inserted.indexOf('diag_3'));
   assert.ok(inserted.indexOf('diag_3') < inserted.indexOf('Second line.'));
 });
+
+test('getSideAnchorPoint and findNearestNodeAnchor snap to shape perimeters cleanly', () => {
+  const box = createDefaultNode('square', 100, 100, 1); // 140x74 -> x:[100..240], y:[100..174]
+  const leftMid = getSideAnchorPoint(box, 'left', 0.5);
+  assert.equal(leftMid.x, 100);
+  assert.equal(leftMid.y, 137);
+
+  const topQuarter = getSideAnchorPoint(box, 'top', 0.25);
+  assert.equal(topQuarter.x, 135);
+  assert.equal(topQuarter.y, 100);
+
+  const circle = createDefaultNode('circle', 0, 0, 2); // 108x108 -> center (54, 54), r=54
+  const circleLeft = getSideAnchorPoint(circle, 'left', 0.5);
+  assert.equal(Math.round(circleLeft.x), 0);
+  assert.equal(Math.round(circleLeft.y), 54);
+
+  const hit = findNearestNodeAnchor([box, circle], { x: 92, y: 137 }, 24);
+  assert.ok(hit);
+  assert.equal(hit.nodeId, box.id);
+  assert.equal(hit.side, 'left');
+  assert.equal(Math.round(hit.point.x), 100);
+
+  const excludedHit = findNearestNodeAnchor([box], { x: 92, y: 137 }, 24, box.id);
+  assert.equal(excludedHit, null);
+
+  const farHit = findNearestNodeAnchor([box, circle], { x: 500, y: 500 }, 24);
+  assert.equal(farHit, null);
+});
+
+test('resolveEdgeGeometry supports orthogonal left-side loops, curved paths, and free arrows', () => {
+  const topBox = createDefaultNode('rounded', 120, 60, 1); // x:120..270, y:60..134
+  const bottomBox = createDefaultNode('rounded', 120, 260, 2); // x:120..270, y:260..334
+  const nodeMap = new Map<string, DiagramNode>([
+    [topBox.id, topBox],
+    [bottomBox.id, bottomBox],
+  ]);
+
+  // Left-side U-loop with 1 waypoint keeps horizontal stubs level when nodes move
+  const sideLoop = createEdge(bottomBox.id, topBox.id, 'license check', {
+    routeStyle: 'orthogonal',
+    fromAnchor: 'left',
+    fromOffset: 0.5,
+    toAnchor: 'left',
+    toOffset: 0.5,
+    waypoints: [{ x: 40, y: 197 }],
+    style: 'dashed',
+  });
+  const loopGeom = resolveEdgeGeometry(sideLoop, nodeMap);
+  assert.ok(loopGeom);
+  assert.equal(loopGeom.p1.x, 120);
+  assert.equal(loopGeom.p1.y, 297);
+  assert.equal(loopGeom.p2.x, 120);
+  assert.equal(loopGeom.p2.y, 97);
+  assert.deepEqual(loopGeom.polylinePoints, [
+    { x: 120, y: 297 },
+    { x: 40, y: 297 },
+    { x: 40, y: 97 },
+    { x: 120, y: 97 },
+  ]);
+  assert.ok(loopGeom.svgPath.startsWith('M 120 297 L 40 297 L 40 97 L 120 97'));
+
+  // Moving topBox vertically updates the horizontal stub automatically while keeping lane x=40
+  const movedTop = { ...topBox, y: 90 };
+  nodeMap.set(topBox.id, movedTop);
+  const movedGeom = resolveEdgeGeometry(sideLoop, nodeMap);
+  assert.ok(movedGeom);
+  assert.equal(movedGeom.polylinePoints[2].x, 40);
+  assert.equal(movedGeom.polylinePoints[2].y, 127);
+
+  // Auto orthogonal same-side loop (no explicit waypoints) detours outside left edge
+  const autoLoop = createEdge(bottomBox.id, topBox.id, '', {
+    routeStyle: 'orthogonal',
+    fromAnchor: 'left',
+    toAnchor: 'left',
+  });
+  const autoGeom = resolveEdgeGeometry(autoLoop, nodeMap);
+  assert.ok(autoGeom);
+  assert.ok(autoGeom.polylinePoints.every((pt) => pt.x <= 120));
+  assert.ok(autoGeom.polylinePoints.some((pt) => pt.x < 120));
+
+  // Curved path with 0 and 1 waypoint
+  const curvedZero = createEdge(topBox.id, bottomBox.id, 'curved', { routeStyle: 'curved' });
+  const curvedZeroGeom = resolveEdgeGeometry(curvedZero, nodeMap);
+  assert.ok(curvedZeroGeom?.svgPath.includes(' C '));
+
+  const curvedOne = createEdge(topBox.id, bottomBox.id, 'bent', {
+    routeStyle: 'curved',
+    waypoints: [{ x: 40, y: 200 }],
+  });
+  const curvedOneGeom = resolveEdgeGeometry(curvedOne, nodeMap);
+  assert.ok(curvedOneGeom?.svgPath.includes(' Q '));
+
+  // Free-floating arrow with no connected nodes
+  const freeArrow = createEdge(undefined, undefined, 'free', {
+    fromPoint: { x: 25, y: 40 },
+    toPoint: { x: 225, y: 180 },
+    routeStyle: 'straight',
+  });
+  const freeGeom = resolveEdgeGeometry(freeArrow, nodeMap);
+  assert.ok(freeGeom);
+  assert.deepEqual(freeGeom.p1, { x: 25, y: 40 });
+  assert.deepEqual(freeGeom.p2, { x: 225, y: 180 });
+  assert.equal(freeGeom.svgPath, 'M 25 40 L 225 180');
+});
+

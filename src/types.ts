@@ -29,10 +29,26 @@ export interface DiagramNode {
   fontSize?: number;
 }
 
+export type EdgeRouteStyle = 'straight' | 'orthogonal' | 'curved';
+export type EdgeAnchorSide = 'auto' | 'top' | 'right' | 'bottom' | 'left';
+
+export interface DiagramPoint {
+  x: number;
+  y: number;
+}
+
 export interface DiagramEdge {
   id: string;
-  fromId: string;
-  toId: string;
+  fromId?: string;
+  toId?: string;
+  fromPoint?: DiagramPoint;
+  toPoint?: DiagramPoint;
+  fromAnchor?: EdgeAnchorSide;
+  toAnchor?: EdgeAnchorSide;
+  fromOffset?: number;
+  toOffset?: number;
+  routeStyle?: EdgeRouteStyle;
+  waypoints?: DiagramPoint[];
   label?: string;
   style: 'solid' | 'dashed';
   arrowEnd: boolean;
